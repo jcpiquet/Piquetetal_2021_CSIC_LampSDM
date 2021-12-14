@@ -1,0 +1,265 @@
+---
+title: "Ocurrence and environmental data"
+author: "Julien Christophe Piquet"
+date: "23 de mayo de 2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,warning=F)
+```
+
+```{r ENMTools}
+library(raster)
+library(ENMTools)
+library(CoordinateCleaner)
+setwd("G:/Research/trabajos/SDM Lampropeltis/Analysis")
+```
+
+## **Presence data**
+
+For the purpose of this study, we used the occurrence data from the native and invasive ranges of *Lampropeltis californiae*.
+
+### **Native range**
+
+To represent occurrence data in the native range, we retrieved 4156 occurrence points from the Global Biological Information Facility and 1324 records from HerpMapper, which we supplemented with 321 records collected on herpetofaunal surveys and 738 records collected throughout the species native range. We trimmed these datasets to remove all records (1) occurring outside the native range of the species, following Pyron & Burbrink (2009), (2) collected before 1970 (older records in global biodiversity databases bear higher coordinate uncertainty), (3) lacking coordinate projection information, (4) whose coordinates' uncertainty was higher than 300 m (corresponding to L. californiae maximum home range following Anguiano & Diffendorfer 2015), and (5) occurring at the sea, using 'cc_sea' function from CoordinateCleaner package. Finally, we used the function 'cc_sea' to remove all data occurring in the sea.
+
+```{r presence data native range}
+presencedata_nat <- read.csv(file=file.path("G:/Research/trabajos/SDM Lampropeltis/presence data/native range/presencedata.csv"),header=T)
+# Checking no data is in the sea
+## Defining the reference shapefile
+USA <- getData("GADM",country="USA",level=0)
+MEX <- getData("GADM",country="MEX",level=0)
+native_range <- bind(USA,MEX)
+## Performing the test to detect records in the sea
+presencedata_nat <- cc_sea(presencedata_nat,lon="Longitude",lat="Latitude",ref=native_range,value="clean")
+# Defining the extent of the native range based on the presence data
+presencedata_nat_shp <- shapefile(x="G:/Research/trabajos/SDM Lampropeltis/presence data/native range/presencedata.shp")
+## Definition of native range extent or subsequent analyses. We draw a 200 km buffer around the points to later draw background points around the actual presences
+e_nat<-buffer(presencedata_nat_shp,width=200000)
+e_nat <- extent(e_nat)
+plot(presencedata_nat_shp)
+plot(native_range,add=T)
+rm(list=setdiff(ls(),c("e_nat")))
+```
+
+### **Invasive range**
+
+Snake occurrences in the invasive range were provided by GESPLAN S.A. and included observations collected between April 2009 and December 2019. We trimmed original occurrence data to retain records from captured individuals, faeces and skin sheddings, while removing observations with imprecise geospatial information (e.g. records in the sea, removed with the previously mentioned 'cc_sea' function), resulting in a final dataset of 8,515 records. 
+
+```{r filtering gesplan dataset}
+gesplan_dataset<-read.csv(file=file.path("G:/Research/trabajos/SDM Lampropeltis/presence data/invasive range/gesplan_dataset.csv"),header=T)
+# Checking no data is in the sea
+## Defining the reference shapefile
+grancanaria<-"G:/Research/Otros/Gran Canaria/MUN_GC.shp"
+grancanaria<-shapefile(grancanaria)
+gesplan_dataset<-cc_sea(gesplan_dataset,lon="longitude",lat="latitude",ref=grancanaria,value="clean")
+write.csv(gesplan_dataset,file=file.path("G:/Research/trabajos/SDM Lampropeltis/presence data/invasive range/GESPLAN_dataset_ccsea_clean.csv"))
+# Plotting GESPLAN dataset
+gesplan_dataset_shp<-SpatialPoints(gesplan_dataset[,5:6],proj4string = crs(grancanaria))
+canarias<-"G:/Research/Otros/ll_autonomicas_inspire_canarias_wgs84/ll_autonomicas_inspire_canarias_wgs84.shp"
+canarias<-shapefile(canarias)
+plot(gesplan_dataset_shp)
+plot(canarias,add=T)
+rm(list=setdiff(ls(),c("e_nat","grancanaria")))
+```
+
+### **Filtering occurrence data in the invasive range**
+
+To retain only established populations, we divided the island of Gran Canaria into 0.0083º (c. 1 km near the equator) grid cells (n = 2,033), calculated the number of records occurring in each of them over the period 2009-2019, and identified grid cells hosting a significant number of snake captures using one sample Wilcoxon rank tests (we set mu = 0). We supplemented these data by including grid cells where snake records significantly increased between 2009 and 2019, which we identified using Mann Kendall trend tests with variance correction.
+
+```{r Determining established populations}
+# Importing the csv
+gesplan_dataset_final<-read.csv(file=file.path("G:/Research/trabajos/SDM Lampropeltis/presence data/invasive range/gesplan_dataset_final.csv"),header=T)
+gesplan_dataset_final$date<-as.Date(gesplan_dataset_final$date,format="%d/%m/%Y")
+# Creating a grid
+## Using a raster to create the grid
+clim10 <- raster::getData('worldclim', var='bio', res=0.5, lon = -20, lat = 01, path = "G:/Research/trabajos/SDM Lampropeltis/climatic data/wc0.5")
+clim11 <- raster::getData('worldclim', var='bio', res=0.5, lon = -20, lat = 31, path = "G:/Research/trabajos/SDM Lampropeltis/climatic data/wc0.5")
+clim_gc<-merge(clim11[[1]],clim10[[1]],overlap=F)
+remove(clim11,clim10)
+grancanaria<-as(grancanaria,'SpatialPolygons')
+grancanaria<-spTransform(grancanaria,CRSobj = CRS("+proj=longlat +datum=WGS84 +ellps=WGS84 +towgs84=0,0,0"))
+clim_gc<-crop(clim_gc,grancanaria)
+grancanaria <- rasterToPolygons(clim_gc,na.rm=T)
+shapefile(grancanaria,filename=file.path("G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/grancanaria_grid.shp"),overwrite=T)
+# Counting the number of snake records per grid cell per year
+## Filtering the dataset per year and season
+presencedata_gc_2009 <- gesplan_dataset_final[gesplan_dataset_final$year==2009,][2:3]
+presencedata_gc_2010 <- gesplan_dataset_final[gesplan_dataset_final$year==2010,][2:3]
+presencedata_gc_2011 <- gesplan_dataset_final[gesplan_dataset_final$year==2011,][2:3]
+presencedata_gc_2012 <- gesplan_dataset_final[gesplan_dataset_final$year==2012,][2:3]
+presencedata_gc_2013 <- gesplan_dataset_final[gesplan_dataset_final$year==2013,][2:3]
+presencedata_gc_2014 <- gesplan_dataset_final[gesplan_dataset_final$year==2014,][2:3]
+presencedata_gc_2015 <- gesplan_dataset_final[gesplan_dataset_final$year==2015,][2:3]
+presencedata_gc_2016 <- gesplan_dataset_final[gesplan_dataset_final$year==2016,][2:3]
+presencedata_gc_2017 <- gesplan_dataset_final[gesplan_dataset_final$year==2017,][2:3]
+presencedata_gc_2018 <- gesplan_dataset_final[gesplan_dataset_final$year==2018,][2:3]
+presencedata_gc_2019 <- gesplan_dataset_final[gesplan_dataset_final$year==2019,][2:3]
+presencedata_gc_2009<-SpatialPointsDataFrame(presencedata_gc_2009,presencedata_gc_2009,proj4string = CRS("+proj=longlat +datum=WGS84 +ellps=WGS84 +towgs84=0,0,0"))
+shapefile(presencedata_gc_2009,filename=file.path("G:/Research/trabajos/SDM Lampropeltis/presence data/invasive range/presencedata_2009.shp"),overwrite=T)
+presencedata_gc_2010<-SpatialPointsDataFrame(presencedata_gc_2010,presencedata_gc_2010,proj4string = CRS("+proj=longlat +datum=WGS84 +ellps=WGS84 +towgs84=0,0,0"))
+shapefile(presencedata_gc_2010,filename=file.path("G:/Research/trabajos/SDM Lampropeltis/presence data/invasive range/presencedata_2010.shp"),overwrite=T)
+presencedata_gc_2011<-SpatialPointsDataFrame(presencedata_gc_2011,presencedata_gc_2011,proj4string = CRS("+proj=longlat +datum=WGS84 +ellps=WGS84 +towgs84=0,0,0"))
+shapefile(presencedata_gc_2011,filename=file.path("G:/Research/trabajos/SDM Lampropeltis/presence data/invasive range/presencedata_2011.shp"),overwrite=T)
+presencedata_gc_2012<-SpatialPointsDataFrame(presencedata_gc_2012,presencedata_gc_2012,proj4string = CRS("+proj=longlat +datum=WGS84 +ellps=WGS84 +towgs84=0,0,0"))
+shapefile(presencedata_gc_2012,filename=file.path("G:/Research/trabajos/SDM Lampropeltis/presence data/invasive range/presencedata_2012.shp"),overwrite=T)
+presencedata_gc_2013<-SpatialPointsDataFrame(presencedata_gc_2013,presencedata_gc_2013,proj4string = CRS("+proj=longlat +datum=WGS84 +ellps=WGS84 +towgs84=0,0,0"))
+shapefile(presencedata_gc_2013,filename=file.path("G:/Research/trabajos/SDM Lampropeltis/presence data/invasive range/presencedata_2013.shp"),overwrite=T)
+presencedata_gc_2014<-SpatialPointsDataFrame(presencedata_gc_2014,presencedata_gc_2014,proj4string = CRS("+proj=longlat +datum=WGS84 +ellps=WGS84 +towgs84=0,0,0"))
+shapefile(presencedata_gc_2014,filename=file.path("G:/Research/trabajos/SDM Lampropeltis/presence data/invasive range/presencedata_2014.shp"),overwrite=T)
+presencedata_gc_2015<-SpatialPointsDataFrame(presencedata_gc_2015,presencedata_gc_2015,proj4string = CRS("+proj=longlat +datum=WGS84 +ellps=WGS84 +towgs84=0,0,0"))
+shapefile(presencedata_gc_2015,filename=file.path("G:/Research/trabajos/SDM Lampropeltis/presence data/invasive range/presencedata_2015.shp"),overwrite=T)
+presencedata_gc_2016<-SpatialPointsDataFrame(presencedata_gc_2016,presencedata_gc_2016,proj4string = CRS("+proj=longlat +datum=WGS84 +ellps=WGS84 +towgs84=0,0,0"))
+shapefile(presencedata_gc_2016,filename=file.path("G:/Research/trabajos/SDM Lampropeltis/presence data/invasive range/presencedata_2016.shp"),overwrite=T)
+presencedata_gc_2017<-SpatialPointsDataFrame(presencedata_gc_2017,presencedata_gc_2017,proj4string = CRS("+proj=longlat +datum=WGS84 +ellps=WGS84 +towgs84=0,0,0"))
+shapefile(presencedata_gc_2017,filename=file.path("G:/Research/trabajos/SDM Lampropeltis/presence data/invasive range/presencedata_2017.shp"),overwrite=T)
+presencedata_gc_2018<-SpatialPointsDataFrame(presencedata_gc_2018,presencedata_gc_2018,proj4string = CRS("+proj=longlat +datum=WGS84 +ellps=WGS84 +towgs84=0,0,0"))
+shapefile(presencedata_gc_2018,filename=file.path("G:/Research/trabajos/SDM Lampropeltis/presence data/invasive range/presencedata_2018.shp"),overwrite=T)
+presencedata_gc_2019<-SpatialPointsDataFrame(presencedata_gc_2019,presencedata_gc_2019,proj4string = CRS("+proj=longlat +datum=WGS84 +ellps=WGS84 +towgs84=0,0,0"))
+shapefile(presencedata_gc_2019,filename=file.path("G:/Research/trabajos/SDM Lampropeltis/presence data/invasive range/presencedata_2019.shp"),overwrite=T)
+## Counts per grid
+library(GISTools)
+count_2009<-poly.counts(presencedata_gc_2009,grancanaria)
+count_2010<-poly.counts(presencedata_gc_2010,grancanaria)
+count_2011<-poly.counts(presencedata_gc_2011,grancanaria)
+count_2012<-poly.counts(presencedata_gc_2012,grancanaria)
+count_2013<-poly.counts(presencedata_gc_2013,grancanaria)
+count_2014<-poly.counts(presencedata_gc_2014,grancanaria)
+count_2015<-poly.counts(presencedata_gc_2015,grancanaria)
+count_2016<-poly.counts(presencedata_gc_2016,grancanaria)
+count_2017<-poly.counts(presencedata_gc_2017,grancanaria)
+count_2018<-poly.counts(presencedata_gc_2018,grancanaria)
+count_2019<-poly.counts(presencedata_gc_2019,grancanaria)
+counts_presence_data <- cbind(count_2009,count_2010,count_2011,count_2012,count_2013,count_2014,count_2015,count_2016,count_2017,count_2018,count_2019)
+colnames(counts_presence_data)<-c("2009","2010","2011","2012","2013","2014","2015","2016","2017","2018","2019")
+total_sum<-apply(counts_presence_data,1,sum)
+counts_presence_data<-cbind(counts_presence_data,total_sum)
+remove(total_sum)
+counts_presence_data<-as.data.frame(counts_presence_data)
+## Attaching raster cell coordinates
+cell_coordinates<-coordinates(grancanaria)
+colnames(cell_coordinates)<-c("Longitude","Latitude")
+counts_presence_data<-cbind(counts_presence_data,cell_coordinates)
+## Identifying the first year of invasion per cell
+year_invasion<-apply(counts_presence_data[,1:11],1,function(x){x_non_zero=min(which(x>0));if(x_non_zero==Inf){0}else{x_non_zero}})
+counts_presence_data<-cbind(counts_presence_data,year_invasion)
+counts_presence_data$year_invasion<-as.character(counts_presence_data$year_invasion)
+counts_presence_data$year_invasion[counts_presence_data$year_invasion=="1"]<-"2009"
+counts_presence_data$year_invasion[counts_presence_data$year_invasion=="2"]<-"2010"
+counts_presence_data$year_invasion[counts_presence_data$year_invasion=="3"]<-"2011"
+counts_presence_data$year_invasion[counts_presence_data$year_invasion=="4"]<-"2012"
+counts_presence_data$year_invasion[counts_presence_data$year_invasion=="5"]<-"2013"
+counts_presence_data$year_invasion[counts_presence_data$year_invasion=="6"]<-"2014"
+counts_presence_data$year_invasion[counts_presence_data$year_invasion=="7"]<-"2015"
+counts_presence_data$year_invasion[counts_presence_data$year_invasion=="8"]<-"2016"
+counts_presence_data$year_invasion[counts_presence_data$year_invasion=="9"]<-"2017"
+counts_presence_data$year_invasion[counts_presence_data$year_invasion=="10"]<-"2018"
+counts_presence_data$year_invasion[counts_presence_data$year_invasion=="11"]<-"2019"
+counts_presence_data$year_invasion<-as.factor(counts_presence_data$year_invasion)
+write.csv(counts_presence_data,file=file.path("G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/counts_presence_data.csv"))
+counts_presence_data_invaded <- counts_presence_data[counts_presence_data$total_sum>0,]
+## Differentiating really invaded plots with one sample Wilcoxon test
+### Continuity correction and normal approximation for p values is applied due to the existence of tied observations
+fun_wilcox <- apply(counts_presence_data_invaded[,1:11],1,function(x){wilcox.test(x,mu=0,paired=F,exact=F)})
+fun_wilcox_p<-sapply(fun_wilcox,"[[","p.value")
+counts_presence_data_invaded<-cbind(counts_presence_data_invaded,fun_wilcox_p)
+## Checking serial correlation in the data
+library(EnvStats)
+fun_autocorrelation <- apply(counts_presence_data_invaded[,1:11],1,function(x){serialCorrelationTest(x)})
+fun_autocorrelation_p<-sapply(fun_autocorrelation,"[[","p.value")
+min(fun_autocorrelation_p)
+## Using Mann Kendall test modified for autocorrelated test
+library(modifiedmk)
+fun_mannkendall <- apply(counts_presence_data_invaded[,1:11],1,function(x){mmkh(x)})
+fun_mannkendall<-as.matrix(t(fun_mannkendall))
+counts_presence_data_invaded<-cbind(counts_presence_data_invaded,fun_mannkendall)
+write.csv(counts_presence_data_invaded,file=file.path("G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/counts_presence_data_invaded.csv"))
+# We manually determine the cells to keep an obtain the following dataset
+presencedata_inv<-read.csv(file=file.path("G:/Research/trabajos/SDM Lampropeltis/presence data/invasive range/presencedata_inv.csv"))
+head(presencedata_inv)
+# Plotting the dataset
+presencedata_inv<-SpatialPoints(presencedata_inv[,14:15])
+canarias<-"G:/Research/Otros/ll_autonomicas_inspire_canarias_wgs84/ll_autonomicas_inspire_canarias_wgs84.shp"
+canarias<-shapefile(canarias)
+plot(presencedata_inv)
+plot(canarias,add=T)
+```
+
+## **Environmental data collection** 
+
+We downloaded for both native and invasive range all 19 climatic variables from the Worldclim interpolated database (Hijmans et al. 2005) at 0.5 min resolution (c. 1 km near the equator) for both the current and future climatic scenarios (see Supplementary Information S1 for further details). 
+
+### **Climatic data**
+
+```{r worldclim variables}
+# Downloading Wordlclim tiles
+clim1 <- raster::getData('worldclim', var='bio', res=0.5, lon = -121, lat = 61,path="G:/Research/trabajos/SDM Lampropeltis/climatic data/wc0.5")
+clim2 <- raster::getData('worldclim', var='bio', res=0.5, lon = -91, lat = 61,path="G:/Research/trabajos/SDM Lampropeltis/climatic data/wc0.5")
+clim3 <- raster::getData('worldclim', var='bio', res=0.5, lon = -61, lat = 61,path="G:/Research/trabajos/SDM Lampropeltis/climatic data/wc0.5")
+clim4 <- raster::getData('worldclim', var='bio', res=0.5, lon = -121, lat = 31,path="G:/Research/trabajos/SDM Lampropeltis/climatic data/wc0.5")
+clim5 <- raster::getData('worldclim', var='bio', res=0.5, lon = -91, lat = 31,path="G:/Research/trabajos/SDM Lampropeltis/climatic data/wc0.5")
+clim6 <- raster::getData('worldclim', var='bio', res=0.5, lon = -61, lat = 31,path="G:/Research/trabajos/SDM Lampropeltis/climatic data/wc0.5")
+clim7 <- raster::getData('worldclim', var='bio', res=0.5, lon = -121, lat = 01,path="G:/Research/trabajos/SDM Lampropeltis/climatic data/wc0.5")
+clim8 <- raster::getData('worldclim', var='bio', res=0.5, lon = -91, lat = 01,path="G:/Research/trabajos/SDM Lampropeltis/climatic data/wc0.5")
+clim9 <- raster::getData('worldclim', var='bio', res=0.5, lon = -61, lat = 01,path="G:/Research/trabajos/SDM Lampropeltis/climatic data/wc0.5")
+clim10 <- raster::getData('worldclim', var='bio', res=0.5, lon = -20, lat = 01, path = "G:/Research/trabajos/SDM Lampropeltis/climatic data/wc0.5")
+clim11 <- raster::getData('worldclim', var='bio', res=0.5, lon = -20, lat = 31, path = "G:/Research/trabajos/SDM Lampropeltis/climatic data/wc0.5")
+# Merging all climatic tiles into a single one
+clim_glob <- merge(clim1,clim2,clim3,clim4,clim5,clim6,clim7,clim8,clim9,clim10,clim11,overlap=FALSE)
+writeRaster(clim_glob,filename=file.path("G:/Research/trabajos/SDM Lampropeltis/climatic data/clim_glob.tif"),bylayer=T,overwrite=T)
+# Cutting to the geographic extent of choice
+clim_nat <- crop(clim_glob,e_nat)
+writeRaster(clim_nat,filename = file.path("G:/Research/trabajos/SDM Lampropeltis/climatic data/clim_nat.tif"),bylayer=T,overwrite=T)
+## Cutting to the geographical extent of the Canary Islands
+### Removing Africa from the geographical extent
+west_canaries <- crop(clim_glob,extent(c(-18.17,-15,27.60,29.42)))
+east_canaries <- crop(clim_glob,extent(c(-15,-13.3343,28.042,29.42)))
+clim_inv <- merge(west_canaries,east_canaries)
+writeRaster(clim_inv,filename = file.path("G:/Research/trabajos/SDM Lampropeltis/climatic data/clim_inv.tif"),bylayer=T,overwrite=T)
+# Merging native and invasive information
+clim <- merge(clim_nat,clim_inv)
+# write the file
+writeRaster(clim,filename=file.path("G:/Research/trabajos/SDM Lampropeltis/climatic data/clim/clim.tif"),bylayer=T,overwrite=T)
+clim
+# Remove unnecessary files
+remove(clim1,clim2,clim3,clim4,clim5,clim6,clim7,clim8,clim9,clim10,clim11,clim_glob,east_canaries,west_canaries)
+```
+
+```{r New Sessions clim, echo =F}
+# For new sessions: list<-list.files(path="G:/Research/trabajos/SDM Lampropeltis/climatic data/clim",pattern="*.tif",full.names=T)
+# clim<-lapply(list,function(x){raster(x=x)})
+# clim<-stack(clim)
+# ordered_names<-c("clim_1","clim_2","clim_3","clim_4","clim_5","clim_6","clim_7","clim_8","clim_9","clim_10","clim_11","clim_12","clim_13","clim_14","clim_15","clim_16","clim_17","clim_18","clim_19")
+# clim <- clim[[ordered_names]]
+# remove(list,ordered_names)
+```
+
+### **Elevation data**
+
+We drew the elevation layer from 30 arc-second digital elevation model (Earth Resources  Observation  and   Science  Center/U.S.  Geological Survey/U.S. Department of  the   Interior 1997.
+
+```{r SRTM GTOPO30}
+# GTOPO30 tiles were uploaded from a local directory
+gtopo1 <- raster(x = "G:/Research/trabajos/SDM Lampropeltis/topographic data/America/gt30w100n40.tif")
+gtopo2 <- raster(x = "G:/Research/trabajos/SDM Lampropeltis/topographic data/America/gt30w100n90.tif")
+gtopo3 <- raster(x = "G:/Research/trabajos/SDM Lampropeltis/topographic data/America/gt30w140n40.tif")
+gtopo4 <- raster(x = "G:/Research/trabajos/SDM Lampropeltis/topographic data/America/gt30w140n90.tif")
+gtopo5 <- raster(x = "G:/Research/trabajos/SDM Lampropeltis/topographic data/Canary Islands/gt30w020n40.tif")
+# Merging all the tiles and calculating aspect and slope
+elevation <- merge(gtopo1,gtopo2,gtopo3,gtopo4,gtopo5,overlap =FALSE)
+elevation_nat<-crop(elevation,clim_nat[[1]])
+elevation_inv<-crop(elevation,clim_inv[[1]])
+elevation<-merge(elevation_nat,elevation_inv,overlap=F)
+writeRaster(elevation,filename=file.path("G:/Research/trabajos/SDM Lampropeltis/topographic data/elevation.tif"),overwrite=T)
+writeRaster(elevation_nat,filename=file.path("G:/Research/trabajos/SDM Lampropeltis/topographic data/elevation_nat.tif"),overwrite=T)
+writeRaster(elevation_inv,filename=file.path("G:/Research/trabajos/SDM Lampropeltis/topographic data/elevation_inv.tif"),overwrite=T)
+elevation
+# Removing unnecessary files
+remove(gtopo1,gtopo2,gtopo3,gtopo4,gtopo5,unmasked_elevation,elevation_nat,elevation_inv)
+```
+
+```{r New session elevation, echo=F}
+# For new sessions: 
+# elevation<-raster(x="G:/Research/trabajos/SDM Lampropeltis/topographic data/elevation.tif")
+```

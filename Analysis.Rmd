@@ -1,0 +1,1030 @@
+---
+title: "Piquet et al. 2020 - Lampropeltis SDM"
+author: "Julien Christophe Piquet"
+date: "19 de noviembre de 2019"
+output:
+ html_document:
+   toc: TRUE
+   toc_float: TRUE
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,warning=F)
+```
+
+```{r ENMTools}
+library(raster)
+library(ENMTools)
+library(CoordinateCleaner)
+setwd("G:/Research/trabajos/SDM Lampropeltis/Analysis")
+```
+
+## **Reduction of environmental variables**
+
+We removed highly correlated environmental variables to prevent multicollinearity and overparametrization in our model; we used the 'vifcor' function from usdm R package (Naimi et al. 2014) to calculate the correlation among environmental predictors and retained variables presenting a correlation < 0.7 and variance inflation factor < 5.
+
+### **Selecting less correlated variables**
+
+```{r reducing the number of correlated variables}
+memory.limit(70000)
+library(usdm)
+# Collecting all environmental layers saved in the hardrive
+list<-list.files(path="G:/Research/trabajos/SDM Lampropeltis/climatic data/clim",pattern=".tif",full.names=T)
+clim<-lapply(list,function(x){raster(x=x)})
+clim<-stack(clim)
+ordered_numbers<-c("clim_1","clim_2","clim_3","clim_4","clim_5","clim_6","clim_7","clim_8","clim_9","clim_10","clim_11","clim_12","clim_13","clim_14","clim_15","clim_16","clim_17","clim_18","clim_19")
+clim<-clim[[ordered_numbers]]
+remove(list,ordered_numbers)
+elevation<-raster(x="G:/Research/trabajos/SDM Lampropeltis/topographic data/elevation.tif")
+env<-stack(clim,elevation)
+vifcor<-vifcor(env,th=0.7)
+vifcor
+selected_env<-env[[c(2,4,8,9,14,18,19)]]
+# To get the environmental layers
+list<-list.files(path="G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/selected_variables",pattern="*.tif",full.names=T)
+selected_env<-lapply(list,function(x){raster(x=x)})
+selected_env<-stack(selected_env)
+ordered_numbers<-c("clim_2","clim_4","clim_8","clim_9","clim_14","clim_18","clim_19")
+selected_env<-selected_env[[ordered_numbers]]
+raster.cor.plot(selected_env)
+remove(list,ordered_numbers,clim,elevation,env,vifcor)
+```
+
+## **Modeling habitat suitability in the Canary Islands**
+
+### **Environmental similarity**
+
+We saved the environmental layers in ASCII format from both the native and invasive range to perform the extrapolation detection analysis on ExDet.
+
+```{r environmental similarity between the native and invasive ranges}
+list<-list.files(path="G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/selected_variables",pattern=".tif",full.names=T)
+env<-lapply(list,function(x){raster(x=x)})
+env<-stack(env)
+ordered_names<-c("clim_2","clim_4","clim_8","clim_9","clim_14","clim_18","clim_19")
+env<-env[[ordered_names]]
+clim_inv_1<-raster(x="G:/Research/trabajos/SDM Lampropeltis/climatic data/clim_inv_1.tif")
+env_inv<-crop(env,clim_inv_1)
+clim_nat_1<-raster(x="G:/Research/trabajos/SDM Lampropeltis/climatic data/clim_nat_1.tif")
+env_nat<-crop(env,clim_nat_1)
+writeRaster(env_inv,filename = file.path("G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/ExDet_current/clim_inv.asc"),bylayer=T,overwrite=T,format="ascii")
+writeRaster(env_nat,filename = file.path("G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/ExDet_current/clim_nat.asc"),bylayer=T,overwrite=T,format="ascii")
+```
+
+### **Model definition and evaluation**
+
+Prior to model construction, we created our species object to run the SDM projections in ENMTools.
+
+```{r object species for selected environmental variables}
+# Loading selected variables
+list<-list.files(path="E:/Research/Projects/A_2019_CSIC_LampSDM/Analysis/Files/selected_variables",pattern=".tif",full.names=T)
+selected_env<-lapply(list,function(x){raster(x=x)})
+selected_env<-stack(selected_env)
+# Defining species name
+lampropeltis <- enmtools.species()
+lampropeltis$species.name<-"Lampropeltis californiae"
+# Defining species object presence points
+## Removing NAs
+presencedata_nat <- read.csv(file=file.path("G:/Research/trabajos/SDM Lampropeltis/presence data/native range/presencedata.csv"),header=T)
+presencedata_inv<-read.csv(file=file.path("G:/Research/trabajos/SDM Lampropeltis/presence data/invasive range/presencedata_inv.csv"))[,14:15]
+presencedata <- rbind(presencedata_nat,presencedata_inv)
+good.points <- complete.cases(raster::extract(selected_env, presencedata))
+presencedata<- presencedata[good.points,]
+## Spatial filtering
+raster.pres <- rasterize(presencedata,selected_env)
+presencedata <- rasterToPoints(raster.pres,spatial=FALSE)
+colnames(presencedata)[1]<-"Longitude"
+colnames(presencedata)[2] <- "Latitude"
+presencedata <- presencedata[,1:2]
+lampropeltis$presence.points <- presencedata
+remove(good.points,raster.pres)
+# Defining species object range
+lampropeltis$range=background.raster.buffer(lampropeltis$presence.points,200000,mask = selected_env)
+# Defining species object background points
+lampropeltis$background.points=background.points.buffer(points=lampropeltis$presence.points,radius=200000,n=10000,mask=selected_env[[1]])
+lampropeltis<-check.species(lampropeltis)
+plot(lampropeltis)
+```
+
+To measure model uncertainty, we used four modelling algorithms (BIOCLIM, GLM, GAM and RF), implemented in the R package ENMTools. For each model, we randomly drew 10,000 background points in native and invasive ranges, sampling within 200 km of presence points, and withheld 30% of the data for posterior model evaluation. Since model results are affected by the choice of pseudo-absences and background points, we replicated each model 10 times. We finally evaluated model performance using the Continuous Boyce Index (calculated for each model iteration and averaged for each algorithm). However, since some algorithms are particularly prone to overfit predictions, we also calculated the minimum difference in AUC between training and test data (AUCdiff), to explicitly test model overfitting (averaged for each algorithm).  
+
+```{r habitat suitability using selected environmental variables}
+# Model fit with proximate variables
+lampropeltis.bc.sel<-replicate(10,enmtools.bc(species=lampropeltis,selected_env,test.prop = 0.3),simplify = F)
+lampropeltis.glm.sel<-replicate(10,enmtools.glm(species=lampropeltis,selected_env,test.prop = 0.3),simplify = F)
+lampropeltis.gam.sel<-replicate(10,enmtools.gam(species=lampropeltis,selected_env,test.prop = 0.3),simplify = F)
+lampropeltis.rf.sel<-replicate(10,enmtools.rf(species=lampropeltis,selected_env,test.prop = 0.3),simplify = F)
+######### Model evaluation
+# Overall CBI
+## BIOCLIM
+library(ecospat)
+lampropeltis.bc.suitability<-sapply(lampropeltis.bc.sel,"[[","suitability")
+lampropeltis.bc.df<-lapply(lampropeltis.bc.sel,"[[","analysis.df")
+lampropeltis.bc.cbi<-mapply(function(x,y){ecospat.boyce(x,y)},x=lampropeltis.bc.suitability,y=lampropeltis.bc.df)
+## GLM
+library(dplyr)
+lampropeltis.glm.suitability<-sapply(lampropeltis.glm.sel,"[[","suitability")
+lampropeltis.glm.df<-lapply(lampropeltis.glm.sel,"[[","analysis.df")
+lampropeltis.glm.df<-lapply(lampropeltis.glm.df,function(x){subset(x,presence==1)})
+lampropeltis.glm.df<-lapply(lampropeltis.glm.df,function(x){x %>% select(1:2)})
+lampropeltis.glm.cbi<-mapply(function(x,y){ecospat.boyce(x,y)},x=lampropeltis.glm.suitability,y=lampropeltis.glm.df)
+## GAM
+lampropeltis.gam.suitability<-sapply(lampropeltis.gam.sel,"[[","suitability")
+lampropeltis.gam.df<-lapply(lampropeltis.gam.sel,"[[","analysis.df")
+lampropeltis.gam.df<-lapply(lampropeltis.gam.df,function(x){subset(x,presence==1)})
+lampropeltis.gam.df<-lapply(lampropeltis.gam.df,function(x){x %>% select(1:2)})
+lampropeltis.gam.cbi<-mapply(function(x,y){ecospat.boyce(x,y)},x=lampropeltis.gam.suitability,y=lampropeltis.gam.df)
+## RF
+lampropeltis.rf.suitability<-sapply(lampropeltis.rf.sel,"[[","suitability")
+lampropeltis.rf.df<-lapply(lampropeltis.rf.sel,"[[","analysis.df")
+lampropeltis.rf.df<-lapply(lampropeltis.rf.df,function(x){subset(x,presence==1)})
+lampropeltis.rf.df<-lapply(lampropeltis.rf.df,function(x){x %>% select(1:2)})
+lampropeltis.rf.cbi<-mapply(function(x,y){ecospat.boyce(x,y)},x=lampropeltis.rf.suitability,y=lampropeltis.rf.df)
+# AUC_diff
+## BIOCLIM
+lampropeltis.bc.sel_auc_training<-sapply(lampropeltis.bc.sel,"[[","training.evaluation")
+lampropeltis.bc.sel_auc_training<-lapply(lampropeltis.bc.sel_auc_training,function(x){slot(x,name="auc")})
+lampropeltis.bc.sel_auc_test<-sapply(lampropeltis.bc.sel,"[[","test.evaluation")
+lampropeltis.bc.sel_auc_test<-lapply(lampropeltis.bc.sel_auc_test,function(x){slot(x,name="auc")})
+lampropeltis.bc.auc.diff<-mapply(function(x,y){x-y},x=lampropeltis.bc.sel_auc_training,y=lampropeltis.bc.sel_auc_test)
+## GLM
+lampropeltis.glm.sel_auc_training<-sapply(lampropeltis.glm.sel,"[[","training.evaluation")
+lampropeltis.glm.sel_auc_training<-lapply(lampropeltis.glm.sel_auc_training,function(x){slot(x,name="auc")})
+lampropeltis.glm.sel_auc_test<-sapply(lampropeltis.glm.sel,"[[","test.evaluation")
+lampropeltis.glm.sel_auc_test<-lapply(lampropeltis.glm.sel_auc_test,function(x){slot(x,name="auc")})
+lampropeltis.glm.auc.diff<-mapply(function(x,y){x-y},x=lampropeltis.glm.sel_auc_training,y=lampropeltis.glm.sel_auc_test)
+## GAM
+lampropeltis.gam.sel_auc_training<-sapply(lampropeltis.gam.sel,"[[","training.evaluation")
+lampropeltis.gam.sel_auc_training<-lapply(lampropeltis.gam.sel_auc_training,function(x){slot(x,name="auc")})
+lampropeltis.gam.sel_auc_test<-sapply(lampropeltis.gam.sel,"[[","test.evaluation")
+lampropeltis.gam.sel_auc_test<-lapply(lampropeltis.gam.sel_auc_test,function(x){slot(x,name="auc")})
+lampropeltis.gam.auc.diff<-mapply(function(x,y){x-y},x=lampropeltis.gam.sel_auc_training,y=lampropeltis.gam.sel_auc_test)
+## RF
+lampropeltis.rf.sel_auc_training<-sapply(lampropeltis.rf.sel,"[[","training.evaluation")
+lampropeltis.rf.sel_auc_training<-lapply(lampropeltis.rf.sel_auc_training,function(x){slot(x,name="auc")})
+lampropeltis.rf.sel_auc_test<-sapply(lampropeltis.rf.sel,"[[","test.evaluation")
+lampropeltis.rf.sel_auc_test<-lapply(lampropeltis.rf.sel_auc_test,function(x){slot(x,name="auc")})
+lampropeltis.rf.auc.diff<-mapply(function(x,y){x-y},x=lampropeltis.rf.sel_auc_training,y=lampropeltis.rf.sel_auc_test)
+# AUC_diff_env
+## BIOCLIM
+lampropeltis.bc.sel_auc_training_env<-sapply(lampropeltis.bc.sel,"[[","env.training.evaluation")
+lampropeltis.bc.sel_auc_training_env<-lapply(lampropeltis.bc.sel_auc_training_env,function(x){slot(x,name="auc")})
+lampropeltis.bc.sel_auc_test_env<-sapply(lampropeltis.bc.sel,"[[","env.test.evaluation")
+lampropeltis.bc.sel_auc_test_env<-lapply(lampropeltis.bc.sel_auc_test_env,function(x){slot(x,name="auc")})
+lampropeltis.bc.auc.diff_env<-mapply(function(x,y){x-y},x=lampropeltis.bc.sel_auc_training_env,y=lampropeltis.bc.sel_auc_test_env)
+## GLM
+lampropeltis.glm.sel_auc_training_env<-sapply(lampropeltis.glm.sel,"[[","env.training.evaluation")
+lampropeltis.glm.sel_auc_training_env<-lapply(lampropeltis.glm.sel_auc_training_env,function(x){slot(x,name="auc")})
+lampropeltis.glm.sel_auc_test_env<-sapply(lampropeltis.glm.sel,"[[","env.test.evaluation")
+lampropeltis.glm.sel_auc_test_env<-lapply(lampropeltis.glm.sel_auc_test_env,function(x){slot(x,name="auc")})
+lampropeltis.glm.auc.diff_env<-mapply(function(x,y){x-y},x=lampropeltis.glm.sel_auc_training_env,y=lampropeltis.glm.sel_auc_test_env)
+## GAM
+lampropeltis.gam.sel_auc_training_env<-sapply(lampropeltis.gam.sel,"[[","env.training.evaluation")
+lampropeltis.gam.sel_auc_training_env<-lapply(lampropeltis.gam.sel_auc_training_env,function(x){slot(x,name="auc")})
+lampropeltis.gam.sel_auc_test_env<-sapply(lampropeltis.gam.sel,"[[","env.test.evaluation")
+lampropeltis.gam.sel_auc_test_env<-lapply(lampropeltis.gam.sel_auc_test_env,function(x){slot(x,name="auc")})
+lampropeltis.gam.auc.diff_env<-mapply(function(x,y){x-y},x=lampropeltis.gam.sel_auc_training_env,y=lampropeltis.gam.sel_auc_test_env)
+## RF
+lampropeltis.rf.sel_auc_training_env<-sapply(lampropeltis.rf.sel,"[[","env.training.evaluation")
+lampropeltis.rf.sel_auc_training_env<-lapply(lampropeltis.rf.sel_auc_training_env,function(x){slot(x,name="auc")})
+lampropeltis.rf.sel_auc_test_env<-sapply(lampropeltis.rf.sel,"[[","env.test.evaluation")
+lampropeltis.rf.sel_auc_test_env<-lapply(lampropeltis.rf.sel_auc_test_env,function(x){slot(x,name="auc")})
+lampropeltis.rf.auc.diff_env<-mapply(function(x,y){x-y},x=lampropeltis.rf.sel_auc_training_env,y=lampropeltis.rf.sel_auc_test_env)
+```
+
+We saved the results from all models. The following sections show the final dataset used for model evaluation.
+
+```{r saving the files for model evaluation with selected variables}
+# Suitability maps
+lampropeltis.bc.suitability<-stack(lampropeltis.bc.suitability)
+writeRaster(lampropeltis.bc.suitability,filename = file.path("G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/Model evaluation_sel/lampropeltis.bc.suitability.tif"),bylayer=T,overwrite=T)
+lampropeltis.glm.suitability<-stack(lampropeltis.glm.suitability)
+writeRaster(lampropeltis.glm.suitability,filename = file.path("G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/Model evaluation_sel/lampropeltis.glm.suitability.tif"),bylayer=T,overwrite=T)
+lampropeltis.gam.suitability<-stack(lampropeltis.gam.suitability)
+writeRaster(lampropeltis.gam.suitability,filename = file.path("G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/Model evaluation_sel/lampropeltis.gam.suitability.tif"),bylayer=T,overwrite=T)
+lampropeltis.rf.suitability<-stack(lampropeltis.rf.suitability)
+writeRaster(lampropeltis.rf.suitability,filename = file.path("G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/Model evaluation_sel/lampropeltis.rf.suitability.tif"),bylayer=T,overwrite=T)
+# Analysis.df
+library(rlist)
+lampropeltis.bc.df<-list.cbind(lampropeltis.bc.df)
+write.csv(lampropeltis.bc.df,file=file.path("G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/Model evaluation_sel/lampropeltis.bc.df.csv"))
+lampropeltis.glm.df<-list.cbind(lampropeltis.glm.df)
+write.csv(lampropeltis.glm.df,file=file.path("G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/Model evaluation_sel/lampropeltis.glm.df.csv"))
+lampropeltis.gam.df<-list.cbind(lampropeltis.gam.df)
+write.csv(lampropeltis.gam.df,file=file.path("G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/Model evaluation_sel/lampropeltis.gam.df.csv"))
+lampropeltis.rf.df<-list.cbind(lampropeltis.rf.df)
+write.csv(lampropeltis.rf.df,file=file.path("G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/Model evaluation_sel/lampropeltis.rf.df.csv"))
+# Overall CBI
+lampropeltis.bc.cbi<-t(as.matrix(lampropeltis.bc.cbi))
+lampropeltis.bc.cbi<-lampropeltis.bc.cbi[,2]
+lampropeltis.bc.cbi<-as.matrix(lampropeltis.bc.cbi)
+lampropeltis.bc.cbi<-as.data.frame(lampropeltis.bc.cbi)
+lampropeltis.bc.cbi$id<-1:10
+lampropeltis.overall.cbi<-lampropeltis.bc.cbi[,c(2,1)]
+lampropeltis.glm.cbi<-t(as.matrix(lampropeltis.glm.cbi))
+lampropeltis.glm.cbi<-lampropeltis.glm.cbi[,2]
+lampropeltis.glm.cbi<-as.matrix(lampropeltis.glm.cbi)
+lampropeltis.glm.cbi<-as.data.frame(lampropeltis.glm.cbi)
+lampropeltis.overall.cbi<-cbind(lampropeltis.overall.cbi,lampropeltis.glm.cbi)
+lampropeltis.gam.cbi<-t(as.matrix(lampropeltis.gam.cbi))
+lampropeltis.gam.cbi<-lampropeltis.gam.cbi[,2]
+lampropeltis.gam.cbi<-as.matrix(lampropeltis.gam.cbi)
+lampropeltis.gam.cbi<-as.data.frame(lampropeltis.gam.cbi)
+lampropeltis.overall.cbi<-cbind(lampropeltis.overall.cbi,lampropeltis.gam.cbi)
+lampropeltis.rf.cbi<-t(as.matrix(lampropeltis.rf.cbi))
+lampropeltis.rf.cbi<-lampropeltis.rf.cbi[,2]
+lampropeltis.rf.cbi<-as.matrix(lampropeltis.rf.cbi)
+lampropeltis.rf.cbi<-as.data.frame(lampropeltis.rf.cbi)
+lampropeltis.overall.cbi<-cbind(lampropeltis.overall.cbi,lampropeltis.rf.cbi)
+colnames(lampropeltis.overall.cbi)<-c("id","bc","glm","gam","rf")
+lampropeltis.overall.cbi<-as.matrix(lampropeltis.overall.cbi)
+write.csv(lampropeltis.overall.cbi,file=file.path("G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/Model evaluation_sel/lampropeltis.overall.cbi.csv"))
+# AUC_diff
+lampropeltis.bc.auc.diff<-as.data.frame(lampropeltis.bc.auc.diff)
+lampropeltis.glm.auc.diff<-as.data.frame(lampropeltis.glm.auc.diff)
+lampropeltis.gam.auc.diff<-as.data.frame(lampropeltis.gam.auc.diff)
+lampropeltis.rf.auc.diff<-as.data.frame(lampropeltis.rf.auc.diff)
+overall.auc.diff<-cbind(lampropeltis.bc.auc.diff,lampropeltis.glm.auc.diff,lampropeltis.gam.auc.diff,lampropeltis.rf.auc.diff)
+write.csv(overall.auc.diff,file=file.path("G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/Model evaluation_sel/overall.auc.diff.csv"))
+# AUC-diff_env
+lampropeltis.bc.auc.diff_env<-as.data.frame(lampropeltis.bc.auc.diff_env)
+lampropeltis.glm.auc.diff_env<-as.data.frame(lampropeltis.glm.auc.diff_env)
+lampropeltis.gam.auc.diff_env<-as.data.frame(lampropeltis.gam.auc.diff_env)
+lampropeltis.rf.auc.diff_env<-as.data.frame(lampropeltis.rf.auc.diff_env)
+overall.auc.diff_env<-cbind(lampropeltis.bc.auc.diff_env,lampropeltis.glm.auc.diff_env,lampropeltis.gam.auc.diff_env,lampropeltis.rf.auc.diff_env)
+write.csv(overall.auc.diff_env,file=file.path("G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/Model evaluation_sel/overall.auc.diff_env.csv"))
+```
+
+```{r habitat suitability with selected variables}
+# BIOCLIM
+lampropeltis.bc.suitability<-mean(lampropeltis.bc.suitability,na.rm=T)
+writeRaster(lampropeltis.bc.suitability,filename = file.path("G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/suitability_sel/lampropeltis.bc.suitability.tif"),overwrite=T)
+# GLM
+lampropeltis.glm.suitability<-mean(lampropeltis.glm.suitability,na.rm=T)
+writeRaster(lampropeltis.glm.suitability,filename = file.path("G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/suitability_sel/lampropeltis.glm.suitability.tif"),overwrite=T)
+# GAM
+lampropeltis.gam.suitability<-mean(lampropeltis.gam.suitability,na.rm=T)
+writeRaster(lampropeltis.gam.suitability,filename = file.path("G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/suitability_sel/lampropeltis.gam.suitability.tif"),overwrite=T)
+# RF
+lampropeltis.rf.suitability<-mean(lampropeltis.rf.suitability,na.rm=T)
+writeRaster(lampropeltis.rf.suitability,filename = file.path("G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/suitability_sel/lampropeltis.rf.suitability.tif"),overwrite=T)
+lampropeltis.bc.suitability
+lampropeltis.glm.suitability
+lampropeltis.gam.suitability
+lampropeltis.rf.suitability
+```
+
+We assessed the accuracy of averaged model predictions by calculating CBI for the invasive range (hereafter CBIinv), using average suitability scores and presence data for this range alone.
+
+```{r cbi in the invasive range}
+library(raster)
+presencedata_inv<-read.csv(file=file.path("G:/Research/trabajos/SDM Lampropeltis/presence data/invasive range/presencedata_inv.csv"))[,14:15]
+# We charge the raster we will use to crop suitability layers
+clim_inv_1<-raster(x="G:/Research/trabajos/SDM Lampropeltis/climatic data/clim_inv_1.tif")
+# We crop the suitability layers from all models
+cbi_sel_list<-list(lampropeltis.bc.suitability,lampropeltis.glm.suitability,lampropeltis.gam.suitability,lampropeltis.rf.suitability)
+cbi_sel_list<-lapply(cbi_sel_list,function(x){crop(x,clim_inv_1)})
+# We calculate CBIinv
+cbi<-lapply(cbi_sel_list, function(x){ecospat.boyce(x,presencedata_inv)})
+remove(cbi_sel_list,cbi)
+```
+
+We removed all files that were unnecessary for posterior analysis.
+
+```{r removing unnecessary files}
+rm(list=setdiff(ls(),c("lampropeltis.glm.sel","selected_env")))
+```
+
+We used the final model to calculate the favorability threshold maximizing the sum of sensitivity and specificity for each model iteration (maxSSS). We used maxSSS averaged over all model iterations to transform model projections into binary predictions that allowed us to differentiate between favorable and unfavorable areas for L. californiae, and characterize environmental conditions in these areas for Gran Canaria and the rest of the archipelago.In this case, the favorability threshold was calculated manually by inspecting the results of each model iteration (**values may differ among model runs**).
+
+```{r favorability calculation}
+glm_favorability<-lapply(lampropeltis.glm.sel,"[[","test.evaluation")
+maxSSS<-mean(c(0.1340112,0.5384501,0.6082268,0.5951108,0.5424576,0.5602603,0.41328,0.3904027,0.5683064,0.3301657))
+```
+
+#### ** Analysis of habitat suitability and favorability in the Canary Islands**
+
+We first analyzed the proportion of Gran Canaria holding suitability values above 0.8 and 0.9.
+
+```{r analysis in Gran Canaria suitability and favorability}
+# Suitability in Gran Canaria
+suitability<-raster(x="G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/suitability_sel/lampropeltis.glm.suitability.tif")
+GC <- extent(c(-15.849,-15.344,27.730,28.205))
+suitability_GC<-crop(suitability,GC)
+suitability_GC_values<-suitability_values<-getValues(suitability_GC)
+area_GC<-area(suitability_GC)
+area_GC_values<-getValues(area_GC)
+suitability_GC_values<-cbind(suitability_GC_values,area_GC_values)
+suitability_GC_values<-suitability_GC_values[complete.cases(suitability_GC_values),]
+colnames(suitability_GC_values)<-c("suitability","area")
+suitability_GC_values<-as.data.frame(suitability_GC_values)
+suitable_areas_GC<-subset(suitability_GC_values,suitability>0.8)
+sum(suitable_areas_GC$area)/sum(suitability_GC_values$area)
+suitability_GC_0.8<-suitability_GC$lampropeltis.glm.suitability>0.8
+plot(suitability_GC_0.8)
+suitable_areas_GC<-subset(suitability_GC_values,suitability>0.9)
+sum(suitable_areas_GC$area)/sum(suitability_GC_values$area)
+suitability_GC_0.9<-suitability_GC$lampropeltis.glm.suitability>0.9
+plot(suitability_GC_0.9)
+rm(list=setdiff(ls(),c("lampropeltis.glm.sel","selected_env","maxSSS")))
+```
+
+We repeated the analysis for the whole archipelago and also calculated the proportion of the Canary Islands that was favorable for *L. californiae* (using the favorability threshold).
+
+```{r analysis of the suitability}
+# Proportion of the arhipelago suitable to Lampropeltis
+suitability<-raster(x="G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/suitability_sel/lampropeltis.glm.suitability.tif")
+clim_inv_1<-raster(x="G:/Research/trabajos/SDM Lampropeltis/climatic data/clim_inv_1.tif")
+suitability.inv<-crop(suitability,clim_inv_1)
+suitability_values<-getValues(suitability.inv)
+area_archipelago<-area(suitability.inv)
+area_archipelago_values<-getValues(area_archipelago)
+suitability_values<-cbind(suitability_values,area_archipelago_values)
+suitability_values<-suitability_values[complete.cases(suitability_values),]
+colnames(suitability_values)<-c("suitability","area")
+suitability_values<-as.data.frame(suitability_values)
+## Proportion of the area with suitability scores above 0.8 and 0.9
+suitable_areas_archipelago<-subset(suitability_values,suitability>0.8)
+sum(suitable_areas_archipelago$area)/sum(suitability_values$area)
+suitable_areas_archipelago<-subset(suitability_values,suitability>0.9)
+sum(suitable_areas_archipelago$area)/sum(suitability_values$area)
+## Proportion of the area favorable to L. californiae
+canary_islands<-crop(suitability,clim_inv_1)
+favorable_areas<-rasterToPolygons(canary_islands,fun=function(x){x>=maxSSS})
+shapefile(favorable_areas,filename=file.path("G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/favorable_areas.shp"),overwrite=T)
+canary_islands<-rasterToPolygons(canary_islands,na.rm = T)
+shapefile(canary_islands,filename=file.path("G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/canary_islands.shp"),overwrite=T)
+### Calulation of the proportions of favorable areas
+lampropeltis.suitability.inv<-crop(suitability,clim_inv_1)
+suitability_values<-getValues(lampropeltis.suitability.inv)
+area_archipelago<-area(lampropeltis.suitability.inv)
+area_archipelago_values<-getValues(area_archipelago)
+suitability_values<-cbind(suitability_values,area_archipelago_values)
+suitability_values<-suitability_values[complete.cases(suitability_values),]
+colnames(suitability_values)<-c("suitability","area")
+suitability_values<-as.data.frame(suitability_values)
+## Proportion of the area favorable to L. californiae
+favorable_areas_archipelago<-subset(suitability_values,suitability>maxSSS)
+sum(favorable_areas_archipelago$area)/sum(suitability_values$area)
+favorable_areas_raster<-suitability.inv$lampropeltis.glm.suitability>maxSSS
+plot(favorable_areas_raster)
+
+#Proportion of Tenerife that is favorable to Lampropeltis
+TF <- extent(c(-16.929,-16.095,27.984,28.636))
+suitability_TF<-crop(suitability,TF)
+suitability_values<-getValues(suitability_TF)
+area_tf<-area(suitability_TF)
+area_tf_values<-getValues(area_tf)
+suitability_values<-cbind(suitability_values,area_tf_values)
+suitability_values<-suitability_values[complete.cases(suitability_values),]
+colnames(suitability_values)<-c("suitability","area")
+suitability_values<-as.data.frame(suitability_values)
+## Proportion of the area with suitability scores above maxSSS
+suitable_areas_tf<-subset(suitability_values,suitability>maxSSS)
+sum(suitable_areas_tf$area)/sum(suitability_values$area)
+rm(list=setdiff(ls(),c("lampropeltis.glm.sel","selected_env","suitability.inv","maxSSS")))
+```
+
+We used final model predictions to evaluate which island from the Canary Islands presented higher habitat suitability using Welch heterocedastic F tests with trimmed means and Winsorized variances (we set the rate of observations to be trimmed at 0.1). We used the 'paircomp' function for pairwise comparisons among islands, after adjusting confidence levels with Holm's method.
+
+```{r analysis per islands}
+# Retrieving the surface of all islands
+suitability<-raster(x="G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/suitability_sel/lampropeltis.glm.suitability.tif")
+LP <- extent(c(-18.019,-17.707,28.445,28.883))
+EH <- extent(c(-18.169,-17.866,27.624,27.886))
+LG <- extent(c(-17.358,-17.089,28.013,28.230))
+TF <- extent(c(-16.929,-16.095,27.984,28.636))
+GC <- extent(c(-15.849,-15.344,27.730,28.205))
+FV <- extent(c(-14.535,-13.774,28.002,28.797))
+LZ <- extent(c(-13.900,-13.384,28.832,29.458))
+suitability_LP <- crop(suitability,LP)
+suitability_EH <- crop(suitability,EH)
+suitability_LG <- crop(suitability,LG)
+suitability_TF <- crop(suitability,TF)
+suitability_GC <- crop(suitability,GC)
+suitability_FV <- crop(suitability,FV)
+suitability_LZ <- crop(suitability,LZ)
+canary_islands<-list(suitability_LP,suitability_EH,suitability_LG,suitability_TF,suitability_GC,suitability_FV,suitability_LZ)
+values_ci <- lapply(canary_islands,getValues)
+canary_islands_suitability<-lapply(values_ci,as.data.frame)
+suitability_values_LP<-canary_islands_suitability[[1]][is.finite(rowSums(canary_islands_suitability[[1]])),]
+write.csv(suitability_values_LP,file=file.path("G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/Island comparison/suitability_values_LP.csv"))
+suitability_values_LP<-as.matrix(suitability_values_LP)
+suitability_values_EH<-canary_islands_suitability[[2]][is.finite(rowSums(canary_islands_suitability[[2]])),]
+write.csv(suitability_values_EH,file=file.path("G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/Island comparison/suitability_values_EH.csv"))
+suitability_values_EH<-as.matrix(suitability_values_EH)
+suitability_values_LG<-canary_islands_suitability[[3]][is.finite(rowSums(canary_islands_suitability[[3]])),]
+write.csv(suitability_values_LG,file=file.path("G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/Island comparison/suitability_values_LG.csv"))
+suitability_values_LG<-as.matrix(suitability_values_LG)
+suitability_values_TF<-canary_islands_suitability[[4]][is.finite(rowSums(canary_islands_suitability[[4]])),]
+write.csv(suitability_values_TF,file=file.path("G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/Island comparison/suitability_values_TF.csv"))
+suitability_values_TF<-as.matrix(suitability_values_TF)
+suitability_values_GC<-canary_islands_suitability[[5]][is.finite(rowSums(canary_islands_suitability[[5]])),]
+write.csv(suitability_values_GC,file=file.path("G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/Island comparison/suitability_values_GC.csv"))
+suitability_values_GC<-as.matrix(suitability_values_GC)
+suitability_values_FV<-canary_islands_suitability[[6]][is.finite(rowSums(canary_islands_suitability[[6]])),]
+write.csv(suitability_values_FV,file=file.path("G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/Island comparison/suitability_values_FV.csv"))
+suitability_values_FV<-as.matrix(suitability_values_FV)
+suitability_values_LZ<-canary_islands_suitability[[7]][is.finite(rowSums(canary_islands_suitability[[7]])),]
+write.csv(suitability_values_LZ,file=file.path("G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/Island comparison/suitability_values_LZ.csv"))
+suitability_values_LZ<-as.matrix(suitability_values_LZ)
+### Statistical comparison
+#### Matrix of all suitability values for each island
+suitability_values_CI <- rbind(suitability_values_LP,suitability_values_EH,suitability_values_LG,suitability_values_TF,suitability_values_GC,suitability_values_FV,suitability_values_LZ)
+suitability_values_CI<-as.matrix(suitability_values_CI)
+island<-c(replicate(nrow(suitability_values_LP),1),replicate(nrow(suitability_values_EH),2),replicate(nrow(suitability_values_LG),3),replicate(nrow(suitability_values_TF),4),replicate(nrow(suitability_values_GC),5),replicate(nrow(suitability_values_FV),6),replicate(nrow(suitability_values_LZ),7))
+suitability_values_CI <- cbind(suitability_values_CI,island)
+colnames(suitability_values_CI)<-c("suitability","island")
+write.csv(suitability_values_CI,file=file.path("G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/Island comparison/suitability_values_CI.csv"))
+suitability_values_CI<-as.data.frame(suitability_values_CI)
+#### Testing normality and homocedasticity of similarity values
+with(suitability_values_CI,hist(suitability))
+library(car)
+with(suitability_values_CI,leveneTest(suitability_values_CI$suitability,island))
+#### Welch test for non-normal and heterocedastic data
+library(onewaytests)
+suitability_values_CI$island<-as.factor(suitability_values_CI$island)
+welch_test<-welch.test(suitability~island,rate=0.1,data=suitability_values_CI)
+paircomp<-paircomp(welch_test,adjust.method=c("holm"))
+write.csv(paircomp,file=file.path("G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/Island comparison/paircomp.csv"))
+welch_test
+paircomp
+rm(list=setdiff(ls(),c("lampropeltis.glm.sel","selected_env","suitability","maxSSS")))
+```
+
+We calculated the average values of each environmental predictor in favorable and unfavorable areas.
+
+```{r analysis of environmental predictors values in favorable areas}
+suitability<-raster(x="E:/Research/Projects/A_2019_CSIC_LampSDM/Analysis/Files/suitability_sel/lampropeltis.glm.suitability.tif")
+clim_inv_1<-raster(x="E:/Research/Projects/A_2019_CSIC_LampSDM/climatic data/clim_inv_1.tif")
+suitability.inv<-crop(suitability,clim_inv_1)
+canary_islands<-suitability.inv
+unfavorable_areas<-rasterToPolygons(canary_islands,fun=function(x){x<maxSSS})
+selected_env_inv<-crop(selected_env,clim_inv_1)
+unfavorable_areas<-mask(selected_env_inv,unfavorable_areas)
+favorable_areas<-mask(selected_env_inv,unfavorable_areas,inverse=T)
+elevation_inv<-raster("E:/Research/Projects/A_2019_CSIC_LampSDM/topographic data/elevation_inv.tif")
+unfavorable_elevation<-mask(elevation_inv,unfavorable_areas)
+min(unfavorable_elevation)
+# Changing units of the temperature data
+unfavorable_areas$clim_2<-unfavorable_areas$clim_2/10
+unfavorable_areas$clim_8<-unfavorable_areas$clim_8/10
+unfavorable_areas$clim_9<-unfavorable_areas$clim_9/10
+favorable_areas$clim_2<-favorable_areas$clim_2/10
+favorable_areas$clim_8<-favorable_areas$clim_8/10
+favorable_areas$clim_9<-favorable_areas$clim_9/10
+mean_unfavorable_areas<-cellStats(unfavorable_areas,'mean')
+mean_favorable_areas<-cellStats(favorable_areas,'mean')
+sd_unfavorable_areas<-cellStats(unfavorable_areas,'sd')
+sd_favorable_areas<-cellStats(favorable_areas,'sd')
+max_unfavorable_areas<-cellStats(unfavorable_areas,'max')
+max_favorable_areas<-cellStats(favorable_areas,'max')
+min_unfavorable_areas<-cellStats(unfavorable_areas,'min')
+min_favorable_areas<-cellStats(favorable_areas,'min')
+mean_unfavorable_areas<-as.matrix(mean_unfavorable_areas)
+mean_favorable_areas<-as.matrix(mean_favorable_areas)
+sd_unfavorable_areas<-as.matrix(sd_unfavorable_areas)
+sd_favorable_areas<-as.matrix(sd_favorable_areas)
+max_unfavorable_areas<-as.matrix(max_unfavorable_areas)
+max_favorable_areas<-as.matrix(max_favorable_areas)
+min_unfavorable_areas<-cellStats(unfavorable_areas,'min')
+min_favorable_areas<-cellStats(favorable_areas,'min')
+stats<-cbind(mean_favorable_areas,sd_favorable_areas,min_favorable_areas,max_favorable_areas,mean_unfavorable_areas,sd_unfavorable_areas,min_unfavorable_areas,max_unfavorable_areas)
+colnames(stats)<-c("mean_favorable","sd_favorable","min_favorable","max_favorable","mean_unfavorable","sd_unfavorable","min_unfavorable","max_unfavorable")
+stats
+write.csv(stats,file = file.path("E:/Research/Projects/A_2019_CSIC_LampSDM/Analysis/Files/stats_unfavorable_areas.csv"))
+rm(list=setdiff(ls(),c("lampropeltis.glm.sel","selected_env","suitability","maxSSS")))
+```
+
+#### ** Variable importance**
+
+We measured the contribution of each variable to predictive habitat suitability for *L. californiae* as in BIOMOD. we randomly redistributed the values of all non-NA grid cells for each variable and iteratively used them along with the remaining original ones in a predictive SDM. All iterations consisted of a GLM constructed with the same analytical parameters as detailed for the original model. We replicated each model iteration 10 times and correlated suitability scores with original predictions of the snake distribution using Pearson correlation coefficients. Subsequently, we calculated the average difference (1- Pearson correlation) between each model iteration and the original predictions, and used it to identify influential variables (i.e. variables producing greater distance values). Lastly, we also determined how environmental predictors influenced habitat suitability by calculating Pearson correlation coefficients between each variable and the original predictions of habitat suitability. 
+
+```{r Variable importance calculation}
+memory.limit(70000)
+# Variable importance
+## Permutation of environmental variables
+shuffled_2<-selected_env[[1]]
+shuffled_2[values(shuffled_2)!="NA"]<-sample(selected_env[[1]][complete.cases(values(selected_env[[1]]))])
+shuffled_4<-selected_env[[2]]
+shuffled_4[values(shuffled_4)!="NA"]<-sample(selected_env[[2]][complete.cases(values(selected_env[[2]]))])
+shuffled_8<-selected_env[[3]]
+shuffled_8[values(shuffled_8)!="NA"]<-sample(selected_env[[3]][complete.cases(values(selected_env[[3]]))])
+shuffled_9<-selected_env[[4]]
+shuffled_9[values(shuffled_9)!="NA"]<-sample(selected_env[[4]][complete.cases(values(selected_env[[4]]))])
+shuffled_14<-selected_env[[5]]
+shuffled_14[values(shuffled_14)!="NA"]<-sample(selected_env[[5]][complete.cases(values(selected_env[[5]]))])
+shuffled_18<-selected_env[[6]]
+shuffled_18[values(shuffled_18)!="NA"]<-sample(selected_env[[6]][complete.cases(values(selected_env[[6]]))])
+shuffled_19<-selected_env[[7]]
+shuffled_19[values(shuffled_19)!="NA"]<-sample(selected_env[[7]][complete.cases(values(selected_env[[7]]))])
+## We compare the shuffled variables and the original ones
+stack_shuffled<-stack(shuffled_2,shuffled_4,shuffled_8,shuffled_9,shuffled_14,shuffled_18,shuffled_19)
+plot(stack_shuffled)
+plot(selected_env)
+## Creating stacks with shuffled variables
+stack_2<-stack(shuffled_2,selected_env[[2:7]])
+stack_4<-stack(selected_env[[1]],shuffled_4,selected_env[[3:7]])
+stack_8<-stack(selected_env[[1:2]],shuffled_8,selected_env[[4:7]])
+stack_9<-stack(selected_env[[1:3]],shuffled_9,selected_env[[5:7]])
+stack_14<-stack(selected_env[[1:4]],shuffled_9,selected_env[[6:7]])
+stack_18<-stack(selected_env[[1:5]],shuffled_18,selected_env[[7]])
+stack_19<-stack(selected_env[[1:6]],shuffled_19)
+## Producing models
+lampropeltis.glm.2 <-replicate(10,enmtools.glm(species=lampropeltis,stack_2,test.prop = 0.3),simplify = F)
+lampropeltis.glm.4 <-replicate(10,enmtools.glm(species=lampropeltis,stack_4,test.prop = 0.3),simplify = F)
+lampropeltis.glm.8 <-replicate(10,enmtools.glm(species=lampropeltis,stack_8,test.prop = 0.3),simplify = F)
+lampropeltis.glm.9<-replicate(10,enmtools.glm(species=lampropeltis,stack_9,test.prop = 0.3),simplify = F)
+lampropeltis.glm.14<-replicate(10,enmtools.glm(species=lampropeltis,stack_14,test.prop = 0.3),simplify = F)
+lampropeltis.glm.18<-replicate(10,enmtools.glm(species=lampropeltis,stack_18,test.prop = 0.3),simplify = F)
+lampropeltis.glm.19<-replicate(10,enmtools.glm(species=lampropeltis,stack_19,test.prop = 0.3),simplify = F)
+### Model suitability 
+lampropeltis.glm.2.stack<-sapply(lampropeltis.glm.2,"[[","suitability")
+lampropeltis.glm.2.stack <- stack(lampropeltis.glm.2.stack)
+writeRaster(lampropeltis.glm.2.stack,filename = file.path("G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/Variable importance/GLM_2/glm2_suitability.tif"),bylayer=T,overwrite=T)
+lampropeltis.glm.4.stack<-sapply(lampropeltis.glm.4,"[[","suitability")
+lampropeltis.glm.4.stack <- stack(lampropeltis.glm.4.stack)
+writeRaster(lampropeltis.glm.4.stack,filename = file.path("G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/Variable importance/GLM_4/glm4_suitability.tif"),bylayer=T,overwrite=T)
+lampropeltis.glm.8.stack<-sapply(lampropeltis.glm.8,"[[","suitability")
+lampropeltis.glm.8.stack <- stack(lampropeltis.glm.8.stack)
+writeRaster(lampropeltis.glm.8.stack,filename = file.path("G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/Variable importance/GLM_8/glm8_suitability.tif"),bylayer=T,overwrite=T)
+lampropeltis.glm.9.stack<-sapply(lampropeltis.glm.9,"[[","suitability")
+lampropeltis.glm.9.stack <- stack(lampropeltis.glm.9.stack)
+writeRaster(lampropeltis.glm.9.stack,filename=file.path("G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/Variable importance/GLM_9/glm9_suitability.tif"),bylayer=T,overwrite=T)
+lampropeltis.glm.14.stack<-sapply(lampropeltis.glm.14,"[[","suitability")
+lampropeltis.glm.14.stack <- stack(lampropeltis.glm.14.stack)
+writeRaster(lampropeltis.glm.14.stack,filename=file.path("G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/Variable importance/GLM_14/glm14_suitability.tif"),bylayer=T,overwrite=T)
+lampropeltis.glm.18.stack<-sapply(lampropeltis.glm.18,"[[","suitability")
+lampropeltis.glm.18.stack <- stack(lampropeltis.glm.18.stack)
+writeRaster(lampropeltis.glm.18.stack,filename=file.path("G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/Variable importance/GLM_18/glm18_suitability.tif"),bylayer=T,overwrite=T)
+lampropeltis.glm.19.stack<-sapply(lampropeltis.glm.19,"[[","suitability")
+lampropeltis.glm.19.stack <- stack(lampropeltis.glm.19.stack)
+writeRaster(lampropeltis.glm.19.stack,filename=file.path("G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/Variable importance/GLM_19/glm19_suitability.tif"),bylayer=T,overwrite=T)
+# Unstacking suitability values
+lampropeltis.glm.2.stack<-sapply(lampropeltis.glm.2,"[[","suitability")
+lampropeltis.glm.4.stack<-sapply(lampropeltis.glm.4,"[[","suitability")
+lampropeltis.glm.8.stack<-sapply(lampropeltis.glm.8,"[[","suitability")
+lampropeltis.glm.8.stack<-sapply(lampropeltis.glm.8,"[[","suitability")
+lampropeltis.glm.9.stack<-sapply(lampropeltis.glm.9,"[[","suitability")
+lampropeltis.glm.14.stack<-sapply(lampropeltis.glm.14,"[[","suitability")
+lampropeltis.glm.18.stack<-sapply(lampropeltis.glm.18,"[[","suitability")
+lampropeltis.glm.19.stack<-sapply(lampropeltis.glm.19,"[[","suitability")
+# For new sessions:
+list<-list.files("G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/Variable importance/GLM_2",pattern="*.tif",full.names = T)
+lampropeltis.glm.2.stack<-lapply(list,function(x){raster(x=x)})
+list<-list.files("G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/Variable importance/GLM_4",pattern="*.tif",full.names = T)
+lampropeltis.glm.4.stack<-lapply(list,function(x){raster(x=x)})
+list<-list.files("G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/Variable importance/GLM_8",pattern="*.tif",full.names = T)
+lampropeltis.glm.8.stack<-lapply(list,function(x){raster(x=x)})
+list<-list.files("G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/Variable importance/GLM_9",pattern="*.tif",full.names = T)
+lampropeltis.glm.9.stack<-lapply(list,function(x){raster(x=x)})
+list<-list.files("G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/Variable importance/GLM_14",pattern="*.tif",full.names = T)
+lampropeltis.glm.14.stack<-lapply(list,function(x){raster(x=x)})
+list<-list.files("G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/Variable importance/GLM_18",pattern="*.tif",full.names = T)
+lampropeltis.glm.18.stack<-lapply(list,function(x){raster(x=x)})
+list<-list.files("G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/Variable importance/GLM_19",pattern="*.tif",full.names = T)
+lampropeltis.glm.19.stack<-lapply(list,function(x){raster(x=x)})
+# Correlations with the original predictions
+lampropeltis.glm.suitability<-raster(x="G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/suitability_sel/lampropeltis.glm.suitability.tif")
+cor_2<-lapply(lampropeltis.glm.2.stack,function(x){raster.cor(x,lampropeltis.glm.suitability)})
+cor_4<-lapply(lampropeltis.glm.4.stack,function(x){raster.cor(x,lampropeltis.glm.suitability)})
+cor_8<-lapply(lampropeltis.glm.8.stack,function(x){raster.cor(x,lampropeltis.glm.suitability)})
+cor_9<-lapply(lampropeltis.glm.9.stack,function(x){raster.cor(x,lampropeltis.glm.suitability)})
+cor_14<-lapply(lampropeltis.glm.14.stack,function(x){raster.cor(x,lampropeltis.glm.suitability)})
+cor_18<-lapply(lampropeltis.glm.18.stack,function(x){raster.cor(x,lampropeltis.glm.suitability)})
+cor_19<-lapply(lampropeltis.glm.19.stack,function(x){raster.cor(x,lampropeltis.glm.suitability)})
+dist_2<-lapply(cor_2,function(x){1-x})
+dist_4<-lapply(cor_4,function(x){1-x})
+dist_8<-lapply(cor_8,function(x){1-x})
+dist_9<-lapply(cor_9,function(x){1-x})
+dist_14<-lapply(cor_14,function(x){1-x})
+dist_18<-lapply(cor_18,function(x){1-x})
+dist_19<-lapply(cor_19,function(x){1-x})
+list<-list(dist_2,dist_4,dist_8,dist_9,dist_14,dist_18,dist_19)
+distances_list<-lapply(list,function(x){as.matrix(x)})
+distances_list<-cbind(distances_list[[1]],distances_list[[2]],distances_list[[3]],distances_list[[4]],distances_list[[5]],distances_list[[6]],distances_list[[7]])
+colnames(distances_list)<-c("mean dirunal range","temp. seasonality","mean temp. wettest quarter","mean temp. driest quarter","precipitation driest month","precipitation warmest quarter","precipitation coldest quarter")
+distances_list
+write.csv(distances_list,file=file.path("G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/Variable importance/dist_matrix.csv"))
+# Correlation of raw environmental predictors with original suitability scores
+stack_suitability<-stack(selected_env,lampropeltis.glm.suitability)
+stack_values<-getValues(stack_suitability)
+library(Hmisc)
+correlations<-rcorr(stack_values,type=c("pearson"))
+cor_matrix<-cbind(correlations$r[,8],correlations$P[,8])
+cor_matrix
+write.csv(cor_matrix,file=file.path("G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/Variable importance/cor_matrix.csv"))
+rm(list=setdiff(ls(),c("lampropeltis.glm.sel","selected_env","maxSSS","lampropeltis")))
+```
+
+## **Projecting to future climate scenarios**
+
+We compared current and future environmental conditions by performing an extrapolation detection analysis in ExDet, for which we used current environmental conditions in the native and invasive ranges pooled together, and environmental predictors from each GCM and each RCP in the Canary Islands, separately.
+
+```{r environmental similarity}
+# Cropping environmental predictors of climate change to the Canary Islands
+list<-list.files(path="G:/Research/trabajos/SDM Lampropeltis/climate change",pattern="*.tif",full.names=T)
+clim_change<-lapply(list,function(x){raster(x=x)})
+clim_change<-stack(clim_change)
+clim_inv_1<-raster(x="G:/Research/trabajos/SDM Lampropeltis/climatic data/clim_inv_1.tif")
+clim_change_inv<-crop(clim_change,clim_inv_1)
+ordered_names<-c("cn26bi502","cn26bi504","cn26bi508","cn26bi509","cn26bi5014","cn26bi5018","cn26bi5019","gs26bi502","gs26bi504","gs26bi508","gs26bi509","gs26bi5014","gs26bi5018","gs26bi5019","mi26bi502","mi26bi504","mi26bi508","mi26bi509","mi26bi5014","mi26bi5018","mi26bi5019","cn85bi502","cn85bi504","cn85bi508","cn85bi509","cn85bi5014","cn85bi5018","cn85bi5019","gs85bi502","gs85bi504","gs85bi508","gs85bi509","gs85bi5014","gs85bi5018","gs85bi5019","mi85bi502","mi85bi504","mi85bi508","mi85bi509","mi85bi5014","mi85bi5018","mi85bi5019")
+clim_change_inv<-clim_change_inv[[ordered_names]]
+writeRaster(clim_change_inv,filename = file.path("G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/Environmental similarity/Projection data"),bylayer=T,overwrite=T,format='ascii')
+# Changing the format of reference data
+list<-list.files(path="G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/selected_variables",pattern="*.tif",full.names=T)
+reference_data<-lapply(list, function(x){raster(x=x)})
+reference_data<-stack(reference_data)
+ordered_names<-c("clim_2","clim_4","clim_8","clim_9","clim_14","clim_18","clim_19")
+reference_data<-reference_data[[ordered_names]]
+writeRaster(reference_data,filename = file.path("G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/Environmental similarity/Reference data/reference_data.asc"),overwrite = T,bylayer=T, format="ascii")
+rm(list=setdiff(ls(),c("lampropeltis.glm.sel","selected_env","maxSSS","lampropeltis")))
+```
+
+We also evaluated whether future climatic scenarios differed significantly from current environmental conditions in the Canary Islands by comparing them to each RCP scenario with Wilcoxon sign tests.
+
+```{r comparing environmental predictors for current and future climatic conditions}
+list<-list.files(path="G:/Research/trabajos/SDM Lampropeltis/climate change",pattern="*.tif",full.names=T)
+clim_change<-lapply(list,function(x){raster(x=x)})
+clim_change<-stack(clim_change)
+clim_inv_1<-raster(x="G:/Research/trabajos/SDM Lampropeltis/climatic data/clim_inv_1.tif")
+clim_change_inv<-crop(clim_change,clim_inv_1)
+ordered_names<-c("cn26bi502","cn26bi504","cn26bi508","cn26bi509","cn26bi5014","cn26bi5018","cn26bi5019","gs26bi502","gs26bi504","gs26bi508","gs26bi509","gs26bi5014","gs26bi5018","gs26bi5019","mi26bi502","mi26bi504","mi26bi508","mi26bi509","mi26bi5014","mi26bi5018","mi26bi5019","cn85bi502","cn85bi504","cn85bi508","cn85bi509","cn85bi5014","cn85bi5018","cn85bi5019","gs85bi502","gs85bi504","gs85bi508","gs85bi509","gs85bi5014","gs85bi5018","gs85bi5019","mi85bi502","mi85bi504","mi85bi508","mi85bi509","mi85bi5014","mi85bi5018","mi85bi5019")
+clim_change_inv<-clim_change_inv[[ordered_names]]
+# Averaging values for RCP
+## RCP 2.6
+### cn
+cn_2.6<-stack(clim_change_inv[[1:7]])
+### gs
+gs_2.6<-stack(clim_change_inv[[8:14]])
+### mi
+mi_2.6<-stack(clim_change_inv[[15:21]])
+## RCP 8.5
+### cn
+cn_8.5<-stack(clim_change_inv[[22:28]])
+### gs
+gs_8.5<-stack(clim_change_inv[[29:35]])
+### mi
+mi_8.5<-stack(clim_change_inv[[36:42]])
+## RCP 2.6
+### cn
+cn_2.6_unstack<-unstack(clim_change_inv[[1:7]])
+### gs
+gs_2.6_unstack<-unstack(clim_change_inv[[8:14]])
+### mi
+mi_2.6_unstack<-unstack(clim_change_inv[[15:21]])
+## RCP 8.5
+### cn
+cn_8.5_unstack<-unstack(clim_change_inv[[22:28]])
+### gs
+gs_8.5_unstack<-unstack(clim_change_inv[[29:35]])
+### mi
+mi_8.5_unstack<-unstack(clim_change_inv[[36:42]])
+## Averaging
+rcp_2.6<-mapply(function(x,y,z){mean(x,y,z)},x=cn_2.6_unstack,y=gs_2.6_unstack,z=mi_2.6_unstack)
+rcp_2.6<-stack(rcp_2.6)
+rcp_8.5<-mapply(function(x,y,z){mean(x,y,z)},x=cn_8.5_unstack,y=gs_8.5_unstack,z=mi_8.5_unstack)
+rcp_8.5<-stack(rcp_8.5)
+# Current conditions
+list<-list.files(path="G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/selected_variables",pattern="*.tif",full.names=T)
+current<-lapply(list,function(x){raster(x=x)})
+current<-stack(current)
+remove(list)
+ordered_names<-c("clim_2","clim_4","clim_8","clim_9","clim_14","clim_18","clim_19")
+current<-current[[ordered_names]]
+current<-crop(current,rcp_2.6)
+# Getting the values from each predictor and condition scenario, and comparing them
+# BIO 2
+mask_bio2<-calc(stack(current[[1]],rcp_2.6[[1]],rcp_8.5[[1]]),fun=mean)
+bio2<-stack(current[[1]],rcp_2.6[[1]],rcp_8.5[[1]])
+bio2<-raster::mask(bio2,mask_bio2) # Synchronizing NAs among rasters
+bio2_current<-getValues(bio2[[1]])
+bio2_current<-bio2_current[complete.cases(bio2_current)]
+bio2_rcp26<-getValues(bio2[[2]])
+bio2_rcp26<-bio2_rcp26[complete.cases(bio2_rcp26)]
+bio2_rcp85<-getValues(bio2[[3]])
+bio2_rcp85<-bio2_rcp85[complete.cases(bio2_rcp85)]
+bio2<-cbind(bio2_current,bio2_rcp26,bio2_rcp85)
+bio2<-as.data.frame(bio2)
+# BIO 4
+mask_bio4<-calc(stack(current[[2]],rcp_2.6[[2]],rcp_8.5[[2]]),fun=mean)
+bio4<-stack(current[[2]],rcp_2.6[[2]],rcp_8.5[[2]])
+bio4<-raster::mask(bio4,mask_bio4) # Synchronizing NAs among rasters
+bio4_current<-getValues(bio4[[1]])
+bio4_current<-bio4_current[complete.cases(bio4_current)]
+bio4_rcp26<-getValues(bio4[[2]])
+bio4_rcp26<-bio4_rcp26[complete.cases(bio4_rcp26)]
+bio4_rcp85<-getValues(bio4[[3]])
+bio4_rcp85<-bio4_rcp85[complete.cases(bio4_rcp85)]
+bio4<-cbind(bio4_current,bio4_rcp26,bio4_rcp85)
+bio4<-as.data.frame(bio4)
+# BIO 8
+mask_bio8<-calc(stack(current[[3]],rcp_2.6[[3]],rcp_8.5[[3]]),fun=mean)
+bio8<-stack(current[[3]],rcp_2.6[[3]],rcp_8.5[[3]])
+bio8<-raster::mask(bio8,mask_bio8) # Synchronizing NAs among rasters
+bio8_current<-getValues(bio8[[1]])
+bio8_current<-bio8_current[complete.cases(bio8_current)]
+bio8_rcp26<-getValues(bio8[[2]])
+bio8_rcp26<-bio8_rcp26[complete.cases(bio8_rcp26)]
+bio8_rcp85<-getValues(bio8[[3]])
+bio8_rcp85<-bio8_rcp85[complete.cases(bio8_rcp85)]
+bio8<-cbind(bio8_current,bio8_rcp26,bio8_rcp85)
+bio8<-as.data.frame(bio8)
+# BIO 9
+mask_bio9<-calc(stack(current[[4]],rcp_2.6[[4]],rcp_8.5[[4]]),fun=mean)
+bio9<-stack(current[[4]],rcp_2.6[[4]],rcp_8.5[[4]])
+bio9<-raster::mask(bio9,mask_bio9) # Synchronizing NAs among rasters
+bio9_current<-getValues(bio9[[1]])
+bio9_current<-bio9_current[complete.cases(bio9_current)]
+bio9_rcp26<-getValues(bio9[[2]])
+bio9_rcp26<-bio9_rcp26[complete.cases(bio9_rcp26)]
+bio9_rcp85<-getValues(bio9[[3]])
+bio9_rcp85<-bio9_rcp85[complete.cases(bio9_rcp85)]
+bio9<-cbind(bio9_current,bio9_rcp26,bio9_rcp85)
+bio9<-as.data.frame(bio9)
+# BIO 14
+mask_bio14<-calc(stack(current[[5]],rcp_2.6[[5]],rcp_8.5[[5]]),fun=mean)
+bio14<-stack(current[[5]],rcp_2.6[[5]],rcp_8.5[[5]])
+bio14<-raster::mask(bio14,mask_bio14) # Synchronizing NAs among rasters
+bio14_current<-getValues(bio14[[1]])
+bio14_current<-bio14_current[complete.cases(bio14_current)]
+bio14_rcp26<-getValues(bio14[[2]])
+bio14_rcp26<-bio14_rcp26[complete.cases(bio14_rcp26)]
+bio14_rcp85<-getValues(bio14[[3]])
+bio14_rcp85<-bio14_rcp85[complete.cases(bio14_rcp85)]
+bio14<-cbind(bio14_current,bio14_rcp26,bio14_rcp85)
+bio14<-as.data.frame(bio14)
+# BIO 18
+mask_bio18<-calc(stack(current[[6]],rcp_2.6[[6]],rcp_8.5[[6]]),fun=mean)
+bio18<-stack(current[[6]],rcp_2.6[[6]],rcp_8.5[[6]])
+bio18<-raster::mask(bio18,mask_bio18) # Synchronizing NAs among rasters
+bio18_current<-getValues(bio18[[1]])
+bio18_current<-bio18_current[complete.cases(bio18_current)]
+bio18_rcp26<-getValues(bio18[[2]])
+bio18_rcp26<-bio18_rcp26[complete.cases(bio18_rcp26)]
+bio18_rcp85<-getValues(bio18[[3]])
+bio18_rcp85<-bio18_rcp85[complete.cases(bio18_rcp85)]
+bio18<-cbind(bio18_current,bio18_rcp26,bio18_rcp85)
+bio18<-as.data.frame(bio18)
+# BIO 19
+mask_bio19<-calc(stack(current[[7]],rcp_2.6[[7]],rcp_8.5[[7]]),fun=mean)
+bio19<-stack(current[[7]],rcp_2.6[[7]],rcp_8.5[[7]])
+bio19<-raster::mask(bio19,mask_bio19) # Synchronizing NAs among rasters
+bio19_current<-getValues(bio19[[1]])
+bio19_current<-bio19_current[complete.cases(bio19_current)]
+bio19_rcp26<-getValues(bio19[[2]])
+bio19_rcp26<-bio19_rcp26[complete.cases(bio19_rcp26)]
+bio19_rcp85<-getValues(bio19[[3]])
+bio19_rcp85<-bio19_rcp85[complete.cases(bio19_rcp85)]
+bio19<-cbind(bio19_current,bio19_rcp26,bio19_rcp85)
+bio19<-as.data.frame(bio19)
+# Mean and SD of all predictors under RCP and current conditions
+predictors_data<-cbind(bio2,bio4,bio8,bio9,bio14,bio18,bio19)
+write.csv(predictors_data,file = file.path("G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/Climate change/predictors_values.csv"))
+# Wilcoxon rank test
+test1<-wilcox.test(predictors_data$bio2_current,predictors_data$bio2_rcp26)
+test2<-wilcox.test(predictors_data$bio2_current,predictors_data$bio2_rcp85)
+test3<-wilcox.test(predictors_data$bio4_current,predictors_data$bio4_rcp26)
+test4<-wilcox.test(predictors_data$bio4_current,predictors_data$bio4_rcp85)
+test5<-wilcox.test(predictors_data$bio8_current,predictors_data$bio8_rcp26)
+test6<-wilcox.test(predictors_data$bio8_current,predictors_data$bio8_rcp85)
+test7<-wilcox.test(predictors_data$bio9_current,predictors_data$bio9_rcp26)
+test8<-wilcox.test(predictors_data$bio9_current,predictors_data$bio9_rcp85)
+test9<-wilcox.test(predictors_data$bio14_current,predictors_data$bio14_rcp26)
+test10<-wilcox.test(predictors_data$bio14_current,predictors_data$bio14_rcp85)
+test11<-wilcox.test(predictors_data$bio18_current,predictors_data$bio18_rcp26)
+test12<-wilcox.test(predictors_data$bio18_current,predictors_data$bio18_rcp85)
+test13<-wilcox.test(predictors_data$bio19_current,predictors_data$bio19_rcp26)
+test14<-wilcox.test(predictors_data$bio19_current,predictors_data$bio19_rcp85)
+list<-list(test1,test2,test3,test4,test5,test6,test7,test8,test9,test10,test11,test12,test13,test14)
+w_values<-lapply(list,"[[","statistic")
+p_values<-lapply(list,"[[","p.value")
+comparison<-cbind(w_values,p_values)
+comparison
+write.csv(comparison,file=file.path("G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/Climate change/comparisons_predictors.csv"))
+```
+
+We arranged the environmental layers from each GCM and each RCP for subsequent modeling process.
+
+```{r climate change: creating data}
+# RCP 2.6
+## cn
+names(cn_2.6)<-c("clim_2","clim_4","clim_8","clim_9","clim_14","clim_18","clim_19")
+cn_2.6.model<-lapply(lampropeltis.glm.sel, function(x) predict(x,cn_2.6,type="response"))
+cn_2.6.model_suitability<-lapply(cn_2.6.model,"[[","raster")
+names_2.6<-seq(1,10,by=1)
+mapply(function(x,y) writeRaster(x,filename=paste("G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/Climate change/cn_2.6/",y,".tif",sep=""),overwrite=T,bylayer=T),x=cn_2.6.model_suitability,y=names_2.6)
+##gs
+names(gs_2.6)<-c("clim_2","clim_4","clim_8","clim_9","clim_14","clim_18","clim_19")
+gs_2.6.model<-lapply(lampropeltis.glm.sel, function(x) predict(x,gs_2.6,type="response"))
+gs_2.6.model_suitability<-lapply(gs_2.6.model,"[[","raster")
+names_2.6<-seq(1,10,by=1)
+mapply(function(x,y) writeRaster(x,filename=paste("G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/Climate change/gs_2.6/",y,".tif",sep=""),overwrite=T,bylayer=T),x=gs_2.6.model_suitability,y=names_2.6)
+##mi
+names(mi_2.6)<-c("clim_2","clim_4","clim_8","clim_9","clim_14","clim_18","clim_19")
+mi_2.6.model<-lapply(lampropeltis.glm.sel, function(x) predict(x,mi_2.6,type="response"))
+mi_2.6.model_suitability<-lapply(mi_2.6.model,"[[","raster")
+names_2.6<-seq(1,10,by=1)
+mapply(function(x,y) writeRaster(x,filename=paste("G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/Climate change/mi_2.6/",y,".tif",sep=""),overwrite=T,bylayer=T),x=mi_2.6.model_suitability,y=names_2.6)
+# RCP 8.5
+## cn
+names(cn_8.5)<-c("clim_2","clim_4","clim_8","clim_9","clim_14","clim_18","clim_19")
+cn_8.5.model<-lapply(lampropeltis.glm.sel, function(x) predict(x,cn_8.5,type="response"))
+cn_8.5.model_suitability<-lapply(cn_8.5.model,"[[","raster")
+names_8.5<-seq(1,10,by=1)
+mapply(function(x,y) writeRaster(x,filename=paste("G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/Climate change/cn_8.5/",y,".tif",sep=""),overwrite=T,bylayer=T),x=cn_8.5.model_suitability,y=names_8.5)
+##gs
+names(gs_8.5)<-c("clim_2","clim_4","clim_8","clim_9","clim_14","clim_18","clim_19")
+gs_8.5.model<-lapply(lampropeltis.glm.sel, function(x) predict(x,gs_8.5,type="response"))
+gs_8.5.model_suitability<-lapply(gs_8.5.model,"[[","raster")
+names_8.5<-seq(1,10,by=1)
+mapply(function(x,y) writeRaster(x,filename=paste("G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/Climate change/gs_8.5/",y,".tif",sep=""),overwrite=T,bylayer=T),x=gs_8.5.model_suitability,y=names_8.5)
+##mi
+names(mi_8.5)<-c("clim_2","clim_4","clim_8","clim_9","clim_14","clim_18","clim_19")
+mi_8.5.model<-lapply(lampropeltis.glm.sel, function(x) predict(x,mi_8.5,type="response"))
+mi_8.5.model_suitability<-lapply(mi_8.5.model,"[[","raster")
+names_8.5<-seq(1,10,by=1)
+mapply(function(x,y) writeRaster(x,filename=paste("G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/Climate change/mi_8.5/",y,".tif",sep=""),overwrite=T,bylayer=T),x=mi_8.5.model_suitability,y=names_8.5)
+cn_2.6_suitability<-stack(cn_2.6.model_suitability)
+gs_2.6_suitability<-stack(gs_2.6.model_suitability)
+mi_2.6_suitability<-stack(mi_2.6.model_suitability)
+cn_8.5_suitability<-stack(cn_8.5.model_suitability)
+gs_8.5_suitability<-stack(gs_8.5.model_suitability)
+mi_8.5_suitability<-stack(mi_8.5.model_suitability)
+RCP2.6<-stack(cn_2.6_suitability,gs_2.6_suitability,mi_2.6_suitability)
+RCP8.5<-stack(cn_8.5_suitability,gs_8.5_suitability,mi_8.5_suitability)
+RCP2.6<-mean(RCP2.6)
+RCP8.5<-mean(RCP8.5)
+writeRaster(RCP2.6,filename = file.path("G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/Climate change/RCP2.6.tif"),overwrite=T)
+writeRaster(RCP8.5,filename = file.path("G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/Climate change/RCP8.5.tif"),overwrite=T)
+plot(RCP2.6)
+plot(RCP8.5)
+```
+
+We analyzed the proportion of Gran Canaria that was favorable to *L. californiae* in each RCP.
+
+```{r analysis in Gran Canaria for future climate scenarios}
+suitability2020<-raster(x="G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/suitability_sel/lampropeltis.glm.suitability.tif")
+suitabilityRCP2.6<-raster(x="G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/climate change/RCP2.6.tif")
+suitabilityRCP8.5<-raster(x="G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/climate change/RCP8.5.tif")
+GC <- extent(c(-15.849,-15.344,27.730,28.205))
+suitability_2020_GC<-crop(suitability2020,GC)
+suitabilityRCP2.6_GC<-crop(suitabilityRCP2.6,GC)
+suitabilityRCP8.5_GC<-crop(suitabilityRCP8.5,GC)
+suitabilityRCP2.6_GC_values<-getValues(suitabilityRCP2.6_GC)
+suitabilityRCP8.5_GC_values<-getValues(suitabilityRCP8.5_GC)
+GC_area<-area(suitability_2020_GC)
+GC_area_values<-getValues(GC_area)
+list<-list(suitabilityRCP2.6_GC_values,suitabilityRCP8.5_GC_values,GC_area_values)
+list<-lapply(list,function(x){as.data.frame(x)})
+dataframe_gc<-cbind(list[[1]],list[[2]],list[[3]])
+colnames(dataframe_gc)<-c("rcp2.6","rcp8.5","area")
+dataframe_gc<-dataframe_gc[complete.cases(dataframe_gc$rcp2.6),]
+100-100*(sum(dataframe_gc[dataframe_gc$rcp2.6>maxSSS,]$area)/sum(dataframe_gc$area))
+100-100*(sum(dataframe_gc[dataframe_gc$rcp8.5>maxSSS,]$area)/sum(dataframe_gc$area))
+plot(suitability_2020_GC$lampropeltis.glm.suitability>maxSSS)
+plot(suitabilityRCP2.6_GC$RCP2.6>maxSSS)
+plot(suitabilityRCP8.5_GC$RCP8.5>maxSSS)
+```
+
+We analyzed the percentage of habitat suitability increase or decrease for each grid cell from current climatic conditions to future RCP scenarios. 
+
+```{r habitat suitability under climat change}
+suitability2020<-raster(x="E:/Research/Projects/A_2019_CSIC_LampSDM/Analysis/Files/suitability_sel/lampropeltis.glm.suitability.tif")
+suitabilityRCP2.6<-raster(x="E:/Research/Projects/A_2019_CSIC_LampSDM/Analysis/Files/climate change/RCP2.6.tif")
+suitabilityRCP8.5<-raster(x="E:/Research/Projects/A_2019_CSIC_LampSDM/Analysis/Files/climate change/RCP8.5.tif")
+# Cropping current suitability to Canary Islands
+suitability2020<-crop(suitability2020,suitabilityRCP2.6)
+# Synchronizing NAs
+mask<-calc(stack(suitability2020,suitabilityRCP2.6,suitabilityRCP8.5),fun=mean)
+suitability2020<-raster::mask(suitability2020,mask)
+suitabilityRCP2.6<-raster::mask(suitabilityRCP2.6,mask)
+suitabilityRCP8.5<-raster::mask(suitabilityRCP8.5,mask)
+# Layers for Gran Canaria
+GC <- extent(c(-15.849,-15.344,27.730,28.205))
+suitability2020_GC<-crop(suitability2020,GC)
+suitabilityRCP2.6_GC<-crop(suitabilityRCP2.6,GC)
+suitabilityRCP8.5_GC<-crop(suitabilityRCP8.5,GC)
+# Calculations of the increase/decrease RCP2.6
+increaseRCP2.6<-((suitabilityRCP2.6-suitability2020)/suitability2020)*100
+increaseRCP2.6_GC<-crop(increaseRCP2.6,GC)
+# Calculations of the increase/decrease RCP8.5
+increaseRCP8.5<-((suitabilityRCP8.5-suitability2020)/suitability2020)*100
+increaseRCP8.5_GC<-crop(increaseRCP8.5,GC)
+# Frequency of increment in Gran Canaria 
+list_GC<-list(increaseRCP2.6_GC,increaseRCP8.5_GC)
+list_GC<-lapply(list_GC,getValues)
+increaseRCP2.6_GC_values<-list_GC[[1]][complete.cases(list_GC[[1]])]
+increaseRCP8.5_GC_values<-list_GC[[2]][complete.cases(list_GC[[2]])]
+library(DescTools)
+freq_2.6_GC<-Freq(increaseRCP2.6_GC_values,breaks=seq(0,round(max(increaseRCP2.6_GC_values)),0.5))
+freq_8.5_GC<-Freq(increaseRCP8.5_GC_values,breaks=seq(0,round(max(increaseRCP8.5_GC_values)),0.5))
+# Frequency of increment in the archipelago
+list<-list(increaseRCP2.6,increaseRCP8.5)
+list<-lapply(list,getValues)
+increaseRCP2.6_values<-list[[1]][complete.cases(list[[1]])]
+increaseRCP8.5_values<-list[[2]][complete.cases(list[[2]])]
+library(DescTools)
+freq_2.6<-Freq(increaseRCP2.6_values,breaks=seq(0,round(max(increaseRCP2.6_values)),2))
+freq_8.5<-Freq(increaseRCP8.5_values,breaks=seq(0,round(max(increaseRCP8.5_values)),2))
+# Calculation of the overall increase in GC
+suitability2020_GC_values<-getValues(suitability2020_GC)
+suitability2020_GC_values<-suitability2020_GC_values[complete.cases(suitability2020_GC_values)]
+suitabilityRCP2.6_GC_values<-getValues(suitabilityRCP2.6_GC)
+suitabilityRCP2.6_GC_values<-suitabilityRCP2.6_GC_values[complete.cases(suitabilityRCP2.6_GC_values)]
+suitabilityRCP8.5_GC_values<-getValues(suitabilityRCP8.5_GC)
+suitabilityRCP8.5_GC_values<-suitabilityRCP8.5_GC_values[complete.cases(suitabilityRCP8.5_GC_values)]
+list<-list(suitability2020_GC_values,suitabilityRCP2.6_GC_values,suitabilityRCP8.5_GC_values)
+values<-lapply(list,sum)
+increaseRCP2.6_GC<-((values[[2]]-values[[1]])/values[[1]])*100
+increaseRCP8.5_GC<-((values[[3]]-values[[1]])/values[[1]])*100
+# Calculation of the overall increase in Canary Islands
+suitability2020_values<-getValues(suitability2020)
+suitability2020_values<-suitability2020_values[complete.cases(suitability2020_values)]
+suitabilityRCP2.6_values<-getValues(suitabilityRCP2.6)
+suitabilityRCP2.6_values<-suitabilityRCP2.6_values[complete.cases(suitabilityRCP2.6_values)]
+suitabilityRCP8.5_values<-getValues(suitabilityRCP8.5)
+suitabilityRCP8.5_values<-suitabilityRCP8.5_values[complete.cases(suitabilityRCP8.5_values)]
+list<-list(suitability2020_values,suitabilityRCP2.6_values,suitabilityRCP8.5_values)
+values<-lapply(list,sum)
+increaseRCP2.6_CI<-((values[[2]]-values[[1]])/values[[1]])*100
+increaseRCP8.5_CI<-((values[[3]]-values[[1]])/values[[1]])*100
+### Map creation
+writeRaster(increaseRCP2.6,filename="E:/Research/Projects/A_2019_CSIC_LampSDM/Analysis/Files/Climate change/increaseRCP2.6.tif",overwrite=T)
+writeRaster(increaseRCP8.5,filename="E:/Research/Projects/A_2019_CSIC_LampSDM/Analysis/Files/Climate change/increaseRCP8.5.tif",overwrite=T)
+```
+
+We analyzed the proportion of the Canary Islands that were favorable to *L. californiae* under RCP 2.6 and RCP 8.5.
+
+```{r analysis of SRC and correlation over the archipelago}
+suitability2020<-raster(x="E:/Research/Projects/A_2019_CSIC_LampSDM/Analysis/Files/suitability_sel/lampropeltis.glm.suitability.tif")
+suitabilityRCP2.6<-raster(x="E:/Research/Projects/A_2019_CSIC_LampSDM/Analysis/Files/climate change/RCP2.6.tif")
+suitabilityRCP8.5<-raster(x="E:/Research/Projects/A_2019_CSIC_LampSDM/Analysis/Files/climate change/RCP8.5.tif")
+suitability2020<-crop(suitability2020,cn_2.6[[1]])
+suitabilityRCP2.6<-crop(suitabilityRCP2.6,cn_2.6[[1]])
+suitabilityRCP8.5<-crop(suitabilityRCP8.5,cn_2.6[[1]])
+# Calulation of the proportions of favorable areas
+suitability_values<-getValues(suitability2020)
+area_archipelago<-area(suitability2020)
+area_archipelago_values<-getValues(area_archipelago)
+suitability_values<-cbind(suitability_values,area_archipelago_values)
+suitability_values<-suitability_values[complete.cases(suitability_values),]
+colnames(suitability_values)<-c("suitability","area")
+suitability_values<-as.data.frame(suitability_values)
+## Proportion of the area favorable to L. californiae
+favorable_areas_archipelago<-subset(suitability_values,suitability>maxSSS)
+favorable_area<-sum(favorable_areas_archipelago$area)
+plot(suitability2020$lampropeltis.glm.suitability>maxSSS)
+## Proportion of favorable areas under RCP2.6 and RCP8.5
+suitability_values_2.6<-getValues(RCP2.6)
+suitability_values_2.6<-cbind(suitability_values_2.6,area_archipelago_values)
+suitability_values_2.6<-suitability_values_2.6[complete.cases(suitability_values_2.6),]
+colnames(suitability_values_2.6)<-c("suitability","area")
+suitability_values_2.6<-as.data.frame(suitability_values_2.6)
+## Proportion of the area favorable to L. californiae
+favorable_areas_archipelago_2.6<-subset(suitability_values_2.6,suitability>maxSSS)
+favorable_area_2.6<-sum(favorable_areas_archipelago_2.6$area)
+((favorable_area_2.6-favorable_area)/favorable_area)*100
+plot(suitabilityRCP2.6$RCP2.6>maxSSS)
+### RCP8.5
+suitability_values_8.5<-getValues(RCP8.5)
+suitability_values_8.5<-cbind(suitability_values_8.5,area_archipelago_values)
+suitability_values_8.5<-suitability_values_8.5[complete.cases(suitability_values_8.5),]
+colnames(suitability_values_8.5)<-c("suitability","area")
+suitability_values_8.5<-as.data.frame(suitability_values_8.5)
+## Proportion of the area favorable to L. californiae
+favorable_areas_archipelago_8.5<-subset(suitability_values_8.5,suitability>maxSSS)
+favorable_area_8.5<-sum(favorable_areas_archipelago_8.5$area)
+((favorable_area_8.5-favorable_area)/favorable_area)*100
+plot(suitabilityRCP8.5$RCP8.5>maxSSS)
+```
+
+We finally compared suitability values between current and future climatic scenarios.
+
+```{r comparing suitability values between current conditions and RCP 2.6 and RCP 8.5}
+suitability2020<-raster(x="G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/suitability_sel/lampropeltis.glm.suitability.tif")
+suitabilityRCP2.6<-raster(x="G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/climate change/RCP2.6.tif")
+suitabilityRCP8.5<-raster(x="G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/climate change/RCP8.5.tif")
+suitability2020<-crop(suitability2020,suitabilityRCP2.6)
+# Synchronizing NAs
+mask<-calc(stack(suitability2020,suitabilityRCP2.6,suitabilityRCP8.5),fun=mean)
+suitability2020<-raster::mask(suitability2020,mask)
+suitabilityRCP2.6<-raster::mask(suitabilityRCP2.6,mask)
+suitabilityRCP8.5<-raster::mask(suitabilityRCP8.5,mask)
+suitability2020_values<-getValues(suitability2020)
+suitabilityRCP2.6_values<-getValues(suitabilityRCP2.6)
+suitabilityRCP8.5_values<-getValues(suitabilityRCP8.5)
+# Removing NAs
+suitability2020_values<-suitability2020_values[complete.cases(suitability2020_values)]
+suitabilityRCP2.6_values<-suitabilityRCP2.6_values[complete.cases(suitabilityRCP2.6_values)]
+suitabilityRCP8.5_values<-suitabilityRCP8.5_values[complete.cases(suitabilityRCP8.5_values)]
+# Wilcoxon tests
+suitability<-cbind(suitability2020_values,suitabilityRCP2.6_values,suitabilityRCP8.5_values)
+colnames(suitability)<-c("s2020","s2.6","s8.5")
+suitability<-as.data.frame(suitability)
+wilcox.test(suitability$s2020,suitability$s2.6)
+wilcox.test(suitability$s2020,suitability$s8.5)
+write.csv(suitability,file = file.path("G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/Climate change/suitability_values.csv"))
+rm(list=setdiff(ls(),c("lampropeltis.glm.sel","selected_env","lampropeltis")))
+save.image("G:/Research/trabajos/SDM Lampropeltis/Analysis/Rdata.RData")
+```
+

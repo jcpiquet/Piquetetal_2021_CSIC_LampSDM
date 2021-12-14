@@ -1,0 +1,274 @@
+---
+title: "MatSupp - Piquet et al. 2020 - Lampropeltis SDM"
+author: "Julien Christophe Piquet"
+date: "20 de mayo de 2020"
+output: html_document
+---
+
+```{r setup, include=FALSE, warning =F}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## **Reduction of environmental variables**
+
+### **PCA**
+
+Prior to model execution, we performed a PCA on all environmental layers, after scaling them to mean 0 and 1 standard deviation, from both ranges combined. Following Kaiser (1991), we retained principal components (PC) producing eigenvalues above 1 to represent environmental layers (hereafter orthogonal variables).
+
+##### **Variables Z-transformation**
+
+```{r variables transformation}
+library(spatialEco)
+memory.limit(size=70000)
+# Standardization of all environmental variables
+clim_scale <- raster.transformation(clim,trans="std")
+elevation_scale <- raster.transformation(elevation,trans="std")
+env_scale<-stack(clim_scale,elevation_scale)
+writeRaster(env_scale,filename=file.path("G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/Scaled variables/env_scale.tif"),overwrite=T,bylayer=T)
+remove(clim_scale,elevation_scale)
+# For new sessions: list<-list.files(path="G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/Scaled variables",pattern=".tif",full.names=T)
+# env_scale<-lapply(list,function(x){raster(x=x)})
+# ordered_numbers<-c("env_scale_1","env_scale_2","env_scale_3","env_scale_4","env_scale_5","env_scale_6","env_scale_7","env_scale_8","env_scale_9","env_scale_10","env_scale_11","env_scale_12","env_scale_13","env_scale_14","env_scale_15","env_scale_16","env_scale_17","env_scale_18","env_scale_19","env_scale_20")
+# env_scale<-stack(env_scale)
+# env_scale <- env_scale[[ordered_numbers]]
+# remove(list,ordered_numbers)
+```
+
+##### **Principal component analysis**
+
+```{r PCA}
+env_pca<-raster.pca(env_scale,4)
+# Evaluating the best PCA
+a <- ((env_pca$pca.object$sdev)^2)/(sum((env_pca$pca.object$sdev)^2))
+var_exp <- matrix(c(a[1],a[2],a[3],a[4],sum(a[1],a[2],a[3],a[4])),nrow=1,ncol=5)
+as.table(var_exp)
+eigenvectors <- as.matrix(env_pca$pca.object$rotation)
+stdev <- as.matrix(env_pca$pca.object$sdev)
+loadings_1 <- eigenvectors[,1]*stdev[1,]
+loadings_2 <- eigenvectors[,2]*stdev[2,]
+loadings_3 <- eigenvectors[,3]*stdev[3,]
+loadings_4 <- eigenvectors[,4]*stdev[4,]
+loadings <- cbind(loadings_1,loadings_2,loadings_3,loadings_4)
+eigenvalues<-(stdev)^2
+env_pca<-stack(env_pca$rasters)
+writeRaster(env_pca,filename = file.path("G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/Env_pca/env_pca.tif"),overwrite = T,bylayer=T)
+write.csv(loadings,file=file.path("G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/Env_pca/loadings.csv"))
+write.csv(var_exp,file=file.path("G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/Env_pca/var_exp.csv"))
+write.csv(eigenvalues,file=file.path("G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/Env_pca/eigenvalues.csv"))
+remove(loadings,eigenvectors,eigenvalues,stdev,a,loadings_1,loadings_2,loadings_3,loadings_4,env_scale,var_exp,eigenvectors,stdev)
+```
+
+### **Habitat suitability estimation with orthogonal variables**
+
+Prior to model difinition, we defined the species object to perform SDM predictions on ENMTools package.
+
+```{r species object for the native and invasive range}
+# Defining species name
+lampropeltis <- enmtools.species()
+lampropeltis$species.name<-"Lampropeltis californiae"
+# Defining species object presence points
+## Removing NAs
+presencedata_inv<-read.csv(file=file.path("G:/Research/trabajos/SDM Lampropeltis/presence data/invasive range/presencedata_inv.csv"))[,14:15]
+presencedata <- rbind(presencedata_nat,presencedata_inv)
+good.points <- complete.cases(raster::extract(env_pca, presencedata))
+presencedata<- presencedata[good.points,]
+## Spatial filtering
+raster.pres <- rasterize(presencedata,env_pca)
+presencedata <- rasterToPoints(raster.pres,spatial=FALSE)
+colnames(presencedata)[1]<-"Longitude"
+colnames(presencedata)[2] <- "Latitude"
+presencedata <- presencedata[,1:2]
+lampropeltis$presence.points <- presencedata
+remove(good.points,raster.pres)
+# Defining species object range
+lampropeltis$range=background.raster.buffer(lampropeltis$presence.points,200000,mask = env_pca)
+# Defining species object background points
+lampropeltis$background.points=background.points.buffer(points=lampropeltis$presence.points,radius=200000,n=10000,mask=env_pca[[1]])
+lampropeltis<-check.species(lampropeltis)
+```
+
+#### **Model definition and evaluation**
+
+We used aforementioned orthogonal environmental layers to model habitat suitability using a combination of four modelling techniques: BIOCLIM, generalized linear model (GLM), generalized additive model (GAM), and random forest (RF). In each model, we randomly drew 10,000 background points in the native and invasive ranges, within 200 km of presence points, and withheld 30% of the data for posterior model evaluation. We carried out model evaluation using the Continuous Boyce index (hereafter CBI) (Hirzel et al. 2006), and estimated model overfitting using the minimum difference between training and test data (AUCdiff) (Warren & Seifert 2011). We calculated CBI values via 'ecospat.boyce' function from ecospat R package, using default settings defined by the authors (Di Cola et al. 2017). We calculated AUCdiff values based on evaluation metrics obtained from the geographical and environmental space. We replicated each model 10 times, averaged evaluation metrics and calculated the unweighted average suitability scores over each algorithm separately. We used average suitability scores in the Canary Islands, and presence data from the invasive range, to estimate model predictive power via the CBI. 
+
+```{r model definition for the native and invasive range}
+# Each model is replicated 10 times
+lampropeltis.bc.pca <-replicate(10,enmtools.bc(species=lampropeltis,env_pca,test.prop = 0.3),simplify = F)
+lampropeltis.glm.pca <- replicate(10,enmtools.glm(species=lampropeltis,env_pca,test.prop = 0.3),simplify=F)
+lampropeltis.gam.pca <- replicate(10,enmtools.gam(species=lampropeltis,env_pca,test.prop = 0.3),simplify=F)
+lampropeltis.rf.pca <- replicate(10,enmtools.rf(species=lampropeltis,env_pca,test.prop = 0.3),simplify=F)
+library(ecospat)
+######### Model evaluation
+# Overall CBI
+## BIOCLIM
+lampropeltis.bc.suitability<-sapply(lampropeltis.bc.pca,"[[","suitability")
+lampropeltis.bc.df<-lapply(lampropeltis.bc.pca,"[[","analysis.df")
+lampropeltis.bc.cbi<-mapply(function(x,y){ecospat.boyce(x,y)},x=lampropeltis.bc.suitability,y=lampropeltis.bc.df)
+## GLM
+library(dplyr)
+lampropeltis.glm.suitability<-sapply(lampropeltis.glm.pca,"[[","suitability")
+lampropeltis.glm.df<-lapply(lampropeltis.glm.pca,"[[","analysis.df")
+lampropeltis.glm.df<-lapply(lampropeltis.glm.df,function(x){subset(x,presence==1)})
+lampropeltis.glm.df<-lapply(lampropeltis.glm.df,function(x){x %>% select(1:2)})
+lampropeltis.glm.cbi<-mapply(function(x,y){ecospat.boyce(x,y)},x=lampropeltis.glm.suitability,y=lampropeltis.glm.df)
+## GAM
+lampropeltis.gam.suitability<-sapply(lampropeltis.gam.pca,"[[","suitability")
+lampropeltis.gam.df<-lapply(lampropeltis.gam.pca,"[[","analysis.df")
+lampropeltis.gam.df<-lapply(lampropeltis.gam.df,function(x){subset(x,presence==1)})
+lampropeltis.gam.df<-lapply(lampropeltis.gam.df,function(x){x %>% select(1:2)})
+lampropeltis.gam.cbi<-mapply(function(x,y){ecospat.boyce(x,y)},x=lampropeltis.gam.suitability,y=lampropeltis.gam.df)
+## RF
+lampropeltis.rf.suitability<-sapply(lampropeltis.rf.pca,"[[","suitability")
+lampropeltis.rf.df<-lapply(lampropeltis.rf.pca,"[[","analysis.df")
+lampropeltis.rf.df<-lapply(lampropeltis.rf.df,function(x){subset(x,presence==1)})
+lampropeltis.rf.df<-lapply(lampropeltis.rf.df,function(x){x %>% select(1:2)})
+lampropeltis.rf.cbi<-mapply(function(x,y){ecospat.boyce(x,y)},x=lampropeltis.rf.suitability,y=lampropeltis.rf.df)
+# AUC_diff
+## BIOCLIM
+lampropeltis.bc.pca_auc_training<-sapply(lampropeltis.bc.pca,"[[","training.evaluation")
+lampropeltis.bc.pca_auc_training<-lapply(lampropeltis.bc.pca_auc_training,function(x){slot(x,name="auc")})
+lampropeltis.bc.pca_auc_test<-sapply(lampropeltis.bc.pca,"[[","test.evaluation")
+lampropeltis.bc.pca_auc_test<-lapply(lampropeltis.bc.pca_auc_test,function(x){slot(x,name="auc")})
+lampropeltis.bc.auc.diff<-mapply(function(x,y){x-y},x=lampropeltis.bc.pca_auc_training,y=lampropeltis.bc.pca_auc_test)
+## GLM
+lampropeltis.glm.pca_auc_training<-sapply(lampropeltis.glm.pca,"[[","training.evaluation")
+lampropeltis.glm.pca_auc_training<-lapply(lampropeltis.glm.pca_auc_training,function(x){slot(x,name="auc")})
+lampropeltis.glm.pca_auc_test<-sapply(lampropeltis.glm.pca,"[[","test.evaluation")
+lampropeltis.glm.pca_auc_test<-lapply(lampropeltis.glm.pca_auc_test,function(x){slot(x,name="auc")})
+lampropeltis.glm.auc.diff<-mapply(function(x,y){x-y},x=lampropeltis.glm.pca_auc_training,y=lampropeltis.glm.pca_auc_test)
+## GAM
+lampropeltis.gam.pca_auc_training<-sapply(lampropeltis.gam.pca,"[[","training.evaluation")
+lampropeltis.gam.pca_auc_training<-lapply(lampropeltis.gam.pca_auc_training,function(x){slot(x,name="auc")})
+lampropeltis.gam.pca_auc_test<-sapply(lampropeltis.gam.pca,"[[","test.evaluation")
+lampropeltis.gam.pca_auc_test<-lapply(lampropeltis.gam.pca_auc_test,function(x){slot(x,name="auc")})
+lampropeltis.gam.auc.diff<-mapply(function(x,y){x-y},x=lampropeltis.gam.pca_auc_training,y=lampropeltis.gam.pca_auc_test)
+## RF
+lampropeltis.rf.pca_auc_training<-sapply(lampropeltis.rf.pca,"[[","training.evaluation")
+lampropeltis.rf.pca_auc_training<-lapply(lampropeltis.rf.pca_auc_training,function(x){slot(x,name="auc")})
+lampropeltis.rf.pca_auc_test<-sapply(lampropeltis.rf.pca,"[[","test.evaluation")
+lampropeltis.rf.pca_auc_test<-lapply(lampropeltis.rf.pca_auc_test,function(x){slot(x,name="auc")})
+lampropeltis.rf.auc.diff<-mapply(function(x,y){x-y},x=lampropeltis.rf.pca_auc_training,y=lampropeltis.rf.pca_auc_test)
+# AUC_diff_env
+## BIOCLIM
+lampropeltis.bc.pca_auc_training_env<-sapply(lampropeltis.bc.pca,"[[","env.training.evaluation")
+lampropeltis.bc.pca_auc_training_env<-lapply(lampropeltis.bc.pca_auc_training_env,function(x){slot(x,name="auc")})
+lampropeltis.bc.pca_auc_test_env<-sapply(lampropeltis.bc.pca,"[[","env.test.evaluation")
+lampropeltis.bc.pca_auc_test_env<-lapply(lampropeltis.bc.pca_auc_test_env,function(x){slot(x,name="auc")})
+lampropeltis.bc.auc.diff_env<-mapply(function(x,y){x-y},x=lampropeltis.bc.pca_auc_training_env,y=lampropeltis.bc.pca_auc_test_env)
+## GLM
+lampropeltis.glm.pca_auc_training_env<-sapply(lampropeltis.glm.pca,"[[","env.training.evaluation")
+lampropeltis.glm.pca_auc_training_env<-lapply(lampropeltis.glm.pca_auc_training_env,function(x){slot(x,name="auc")})
+lampropeltis.glm.pca_auc_test_env<-sapply(lampropeltis.glm.pca,"[[","env.test.evaluation")
+lampropeltis.glm.pca_auc_test_env<-lapply(lampropeltis.glm.pca_auc_test_env,function(x){slot(x,name="auc")})
+lampropeltis.glm.auc.diff_env<-mapply(function(x,y){x-y},x=lampropeltis.glm.pca_auc_training_env,y=lampropeltis.glm.pca_auc_test_env)
+## GAM
+lampropeltis.gam.pca_auc_training_env<-sapply(lampropeltis.gam.pca,"[[","env.training.evaluation")
+lampropeltis.gam.pca_auc_training_env<-lapply(lampropeltis.gam.pca_auc_training_env,function(x){slot(x,name="auc")})
+lampropeltis.gam.pca_auc_test_env<-sapply(lampropeltis.gam.pca,"[[","env.test.evaluation")
+lampropeltis.gam.pca_auc_test_env<-lapply(lampropeltis.gam.pca_auc_test_env,function(x){slot(x,name="auc")})
+lampropeltis.gam.auc.diff_env<-mapply(function(x,y){x-y},x=lampropeltis.gam.pca_auc_training_env,y=lampropeltis.gam.pca_auc_test_env)
+## RF
+lampropeltis.rf.pca_auc_training_env<-sapply(lampropeltis.rf.pca,"[[","env.training.evaluation")
+lampropeltis.rf.pca_auc_training_env<-lapply(lampropeltis.rf.pca_auc_training_env,function(x){slot(x,name="auc")})
+lampropeltis.rf.pca_auc_test_env<-sapply(lampropeltis.rf.pca,"[[","env.test.evaluation")
+lampropeltis.rf.pca_auc_test_env<-lapply(lampropeltis.rf.pca_auc_test_env,function(x){slot(x,name="auc")})
+lampropeltis.rf.auc.diff_env<-mapply(function(x,y){x-y},x=lampropeltis.rf.pca_auc_training_env,y=lampropeltis.rf.pca_auc_test_env)
+```
+
+```{r saving the files for model evaluation}
+# Suitability maps
+lampropeltis.bc.suitability<-stack(lampropeltis.bc.suitability)
+writeRaster(lampropeltis.bc.suitability,filename = file.path("G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/Model evaluation/lampropeltis.bc.suitability.tif"),bylayer=T,overwrite=T)
+lampropeltis.glm.suitability<-stack(lampropeltis.glm.suitability)
+writeRaster(lampropeltis.glm.suitability,filename = file.path("G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/Model evaluation/lampropeltis.glm.suitability.tif"),bylayer=T,overwrite=T)
+lampropeltis.gam.suitability<-stack(lampropeltis.gam.suitability)
+writeRaster(lampropeltis.gam.suitability,filename = file.path("G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/Model evaluation/lampropeltis.gam.suitability.tif"),bylayer=T,overwrite=T)
+lampropeltis.rf.suitability<-stack(lampropeltis.rf.suitability)
+writeRaster(lampropeltis.rf.suitability,filename = file.path("G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/Model evaluation/lampropeltis.rf.suitability.tif"),bylayer=T,overwrite=T)
+# Analysis.df
+library(rlist)
+lampropeltis.bc.df<-list.cbind(lampropeltis.bc.df)
+write.csv(lampropeltis.bc.df,file=file.path("G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/Model evaluation/lampropeltis.bc.df.csv"))
+lampropeltis.glm.df<-list.cbind(lampropeltis.glm.df)
+write.csv(lampropeltis.glm.df,file=file.path("G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/Model evaluation/lampropeltis.glm.df.csv"))
+lampropeltis.gam.df<-list.cbind(lampropeltis.gam.df)
+write.csv(lampropeltis.gam.df,file=file.path("G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/Model evaluation/lampropeltis.gam.df.csv"))
+lampropeltis.rf.df<-list.cbind(lampropeltis.rf.df)
+write.csv(lampropeltis.rf.df,file=file.path("G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/Model evaluation/lampropeltis.rf.df.csv"))
+# Overall CBI
+lampropeltis.bc.cbi<-t(as.matrix(lampropeltis.bc.cbi))
+lampropeltis.bc.cbi<-lampropeltis.bc.cbi[,2]
+lampropeltis.bc.cbi<-as.matrix(lampropeltis.bc.cbi)
+lampropeltis.bc.cbi<-as.data.frame(lampropeltis.bc.cbi)
+lampropeltis.bc.cbi$id<-1:10
+lampropeltis.overall.cbi<-lampropeltis.bc.cbi[,c(2,1)]
+lampropeltis.glm.cbi<-t(as.matrix(lampropeltis.glm.cbi))
+lampropeltis.glm.cbi<-lampropeltis.glm.cbi[,2]
+lampropeltis.glm.cbi<-as.matrix(lampropeltis.glm.cbi)
+lampropeltis.glm.cbi<-as.data.frame(lampropeltis.glm.cbi)
+lampropeltis.overall.cbi<-cbind(lampropeltis.overall.cbi,lampropeltis.glm.cbi)
+lampropeltis.gam.cbi<-t(as.matrix(lampropeltis.gam.cbi))
+lampropeltis.gam.cbi<-lampropeltis.gam.cbi[,2]
+lampropeltis.gam.cbi<-as.matrix(lampropeltis.gam.cbi)
+lampropeltis.gam.cbi<-as.data.frame(lampropeltis.gam.cbi)
+lampropeltis.overall.cbi<-cbind(lampropeltis.overall.cbi,lampropeltis.gam.cbi)
+lampropeltis.rf.cbi<-t(as.matrix(lampropeltis.rf.cbi))
+lampropeltis.rf.cbi<-lampropeltis.rf.cbi[,2]
+lampropeltis.rf.cbi<-as.matrix(lampropeltis.rf.cbi)
+lampropeltis.rf.cbi<-as.data.frame(lampropeltis.rf.cbi)
+lampropeltis.overall.cbi<-cbind(lampropeltis.overall.cbi,lampropeltis.rf.cbi)
+colnames(lampropeltis.overall.cbi)<-c("id","bc","glm","gam","rf")
+lampropeltis.overall.cbi<-as.matrix(lampropeltis.overall.cbi)
+write.csv(lampropeltis.overall.cbi,file=file.path("G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/Model evaluation/lampropeltis.overall.cbi.csv"))
+# AUC_diff
+lampropeltis.bc.auc.diff<-as.data.frame(lampropeltis.bc.auc.diff)
+lampropeltis.glm.auc.diff<-as.data.frame(lampropeltis.glm.auc.diff)
+lampropeltis.gam.auc.diff<-as.data.frame(lampropeltis.gam.auc.diff)
+lampropeltis.rf.auc.diff<-as.data.frame(lampropeltis.rf.auc.diff)
+overall.auc.diff<-cbind(lampropeltis.bc.auc.diff,lampropeltis.glm.auc.diff,lampropeltis.gam.auc.diff,lampropeltis.rf.auc.diff)
+write.csv(overall.auc.diff,file=file.path("G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/Model evaluation/overall.auc.diff.csv"))
+# AUC-diff_env
+lampropeltis.bc.auc.diff_env<-as.data.frame(lampropeltis.bc.auc.diff_env)
+lampropeltis.glm.auc.diff_env<-as.data.frame(lampropeltis.glm.auc.diff_env)
+lampropeltis.gam.auc.diff_env<-as.data.frame(lampropeltis.gam.auc.diff_env)
+lampropeltis.rf.auc.diff_env<-as.data.frame(lampropeltis.rf.auc.diff_env)
+overall.auc.diff_env<-cbind(lampropeltis.bc.auc.diff_env,lampropeltis.glm.auc.diff_env,lampropeltis.gam.auc.diff_env,lampropeltis.rf.auc.diff_env)
+write.csv(overall.auc.diff_env,file=file.path("G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/Model evaluation/overall.auc.diff_env.csv"))
+```
+
+```{r habitat suitability}
+# BIOCLIM
+lampropeltis.bc.suitability<-mean(lampropeltis.bc.suitability)
+writeRaster(lampropeltis.bc.suitability,filename = file.path("G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/suitability/lampropeltis.bc.suitability.tif"),overwrite=T)
+# GLM
+lampropeltis.glm.suitability<-mean(lampropeltis.glm.suitability)
+writeRaster(lampropeltis.glm.suitability,filename = file.path("G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/suitability/lampropeltis.glm.suitability.tif"),overwrite=T)
+# GAM
+lampropeltis.gam.suitability<-mean(lampropeltis.gam.suitability)
+writeRaster(lampropeltis.gam.suitability,filename = file.path("G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/suitability/lampropeltis.gam.suitability.tif"),overwrite=T)
+# RF
+lampropeltis.rf.suitability<-mean(lampropeltis.rf.suitability)
+writeRaster(lampropeltis.rf.suitability,filename = file.path("G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/suitability/lampropeltis.rf.suitability.tif"),overwrite=T)
+```
+
+```{r cbi in the invasive range using orthogonal variables}
+presencedata_inv<-read.csv(file=file.path("G:/Research/trabajos/SDM Lampropeltis/presence data/invasive range/presencedata_inv.csv"))[,14:15]
+clim_inv_1<-raster(x="G:/Research/trabajos/SDM Lampropeltis/climatic data/clim_inv_1.tif")
+cbi_pca_list<-list(lampropeltis.bc.suitability,lampropeltis.glm.suitability,lampropeltis.gam.suitability,lampropeltis.rf.suitability)
+cbi_pca_list<-lapply(cbi_pca_list,function(x){crop(x,clim_inv_1)})
+cbi<-lapply(cbi_pca_list, function(x){ecospat.boyce(x,presencedata_inv)})
+cbi.matrix<-as.matrix(cbi)
+write.csv(cbi,file=file.path("C:/Users/Julien/SDM Lampropeltis/Analysis/Files/Model evaluation_sel/CBI_inv.csv"))
+remove(clim_inv_1,cbi_pca_list,cbi,cbi.matrix)
+```
+
+We retained the model with highest predictive power and calculated its correlation with the output of the model performed with proximate non-correlated variables, to assess the similarity between both predictions. 
+
+```{r correlation with the suitability scores obtained with orthogonal variables}
+suitability.pca<-raster(x="G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/suitability/lampropeltis.glm.suitability.tif")
+suitability_sel<-raster(x="G:/Research/trabajos/SDM Lampropeltis/Analysis/Files/suitability_sel/lampropeltis.glm.suitability.tif")
+suitability_pca_values<-getValues(suitability.pca)
+suitability_sel_values<-getValues(suitability_sel)
+cor.test(suitability_pca_values,suitability_sel_values,method="spearman")
+remove(suitability.pca,suitability_sel)
+```
